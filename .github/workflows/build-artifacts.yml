@@ -92,8 +92,46 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Build Tauri
-        run: pnpm tauri build
+      - name: Resolve Tauri tools cache
+        id: tauri-tools
+        shell: bash
+        run: |
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            echo "path=${LOCALAPPDATA}/tauri" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=${HOME}/.cache/tauri" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.tauri-tools.outputs.path }}
+          key: tauri-bundler-tools-${{ matrix.platform }}-nsis-3.11-utils-0.5.3
+
+      # ureq (used by tauri-bundler) has no retries; GitHub often drops
+      # nsis-3.11.zip with `io: Peer disconnected` after a long compile.
+      - name: Prefetch NSIS
+        if: matrix.platform == 'windows'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/prefetch-tauri-nsis.mjs
+
+      - name: Compile Tauri app
+        run: pnpm tauri build --no-bundle
+
+      - name: Bundle installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if pnpm tauri bundle; then
+              exit 0
+            fi
+            if [ "${attempt}" -lt 3 ]; then
+              echo "bundle attempt ${attempt} failed; retrying in 20s..." >&2
+              sleep 20
+            fi
+          done
+          exit 1
 
       - name: Collect Windows bundles
         if: matrix.platform == 'windows'

@@ -232,34 +232,37 @@ fn exe_name_matches(configured: &str, proc_name: &str) -> bool {
 }
 
 /// Parse user-entered exe / path into basename + optional path hint (parent dir).
+///
+/// Splits on both `/` and `\` so Windows-style paths parse correctly on Unix CI hosts
+/// (and vice versa for forward-slash paths on Windows).
 pub fn parse_exe_input(raw: &str) -> Result<(String, Option<String>), String> {
     let trimmed = raw.trim().trim_matches('"').trim();
     if trimmed.is_empty() {
         return Err("Exe / path is required".into());
     }
-    let path = Path::new(trimmed);
-    let exe_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(trimmed)
-        .to_string();
+    let trimmed = trimmed.trim_end_matches(['\\', '/']);
+    if trimmed.is_empty() {
+        return Err("Could not parse exe name".into());
+    }
+    let (parent, exe_name) = match trimmed.rsplit_once(['\\', '/']) {
+        Some((parent, name)) if !name.is_empty() => (Some(parent), name),
+        _ => (None, trimmed),
+    };
     if exe_name.is_empty() {
         return Err("Could not parse exe name".into());
     }
-    let path_hint = path.parent().and_then(|p| {
-        let s = p.to_string_lossy();
-        let s = s.trim().trim_end_matches(['\\', '/']);
+    let path_hint = parent.and_then(|p| {
+        let s = p.trim().trim_end_matches(['\\', '/']);
         if s.is_empty() || s == "." {
             None
         } else {
             // Prefer last folder segment as a stable hint (e.g. "Hades" from D:\Games\Hades).
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.to_string())
+            s.rsplit_once(['\\', '/'])
+                .map(|(_, last)| last.to_string())
                 .or_else(|| Some(s.to_string()))
         }
     });
-    Ok((exe_name, path_hint))
+    Ok((exe_name.to_string(), path_hint))
 }
 
 #[cfg(test)]
@@ -444,5 +447,12 @@ mod tests {
         let (name, hint) = parse_exe_input("game.exe").unwrap();
         assert_eq!(name, "game.exe");
         assert!(hint.is_none());
+    }
+
+    #[test]
+    fn parse_unix_style_path() {
+        let (name, hint) = parse_exe_input("/opt/games/Hades/Hades.exe").unwrap();
+        assert_eq!(name, "Hades.exe");
+        assert_eq!(hint.as_deref(), Some("Hades"));
     }
 }

@@ -1,0 +1,21 @@
+[
+  {
+    "id": "local:hades",
+    "name": "Hades",
+    "executables": [
+      { "os": "windows", "name": "Hades.exe", "is_launcher": false },
+      { "os": "linux", "name": "Hades", "is_launcher": false }
+    ],
+    "path_hints": ["Hades"],
+    "arguments": null
+  },
+  {
+    "id": "local:gmod",
+    "name": "Garry's Mod",
+    "executables": [
+      { "os": "windows", "name": "hl2.exe", "is_launcher": false }
+    ],
+    "path_hints": ["GarrysMod", "garrysmod"],
+    "arguments": "-game garrysmod"
+  }
+]

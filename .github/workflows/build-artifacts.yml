@@ -1,0 +1,175 @@
+name: build-artifacts
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Optional version override (e.g. 0.1.0-canary.a1b2c3d)
+        required: false
+        type: string
+        default: ""
+    outputs:
+      version:
+        description: Resolved app version used for this build
+        value: ${{ jobs.prepare.outputs.version }}
+      arch_pkgver:
+        description: Arch-safe pkgver (hyphens replaced with dots)
+        value: ${{ jobs.prepare.outputs.arch_pkgver }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      arch_pkgver: ${{ steps.resolve.outputs.arch_pkgver }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="$(node -p "require('./package.json').version")"
+          fi
+          ARCH_PKGVER="${VERSION//-/.}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "arch_pkgver=${ARCH_PKGVER}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version=${VERSION} arch_pkgver=${ARCH_PKGVER}"
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+          - os: ubuntu-22.04
+            platform: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync version from package.json
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: node scripts/sync-version.mjs "$VERSION"
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: ${{ matrix.platform }}-${{ needs.prepare.outputs.version }}
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri
+        run: pnpm tauri build
+
+      - name: Collect Windows bundles
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-out
+          find src-tauri/target/release/bundle -type f \( -name '*.exe' -o -name '*.msi' \) -print -exec cp -v {} dist-out/ \;
+          ls -la dist-out
+
+      - name: Collect Linux bundles
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-out
+          find src-tauri/target/release/bundle -type f \( -name '*.AppImage' -o -name '*.deb' \) -print -exec cp -v {} dist-out/ \;
+          ls -la dist-out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}-bundles
+          path: dist-out/*
+          if-no-files-found: error
+          retention-days: 14
+
+  arch:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-bundles
+          path: linux-bundles
+
+      - name: Build Arch package
+        env:
+          ARCH_PKGVER: ${{ needs.prepare.outputs.arch_pkgver }}
+        run: |
+          set -euo pipefail
+          DEB="$(find linux-bundles -name '*.deb' -print -quit)"
+          if [ -z "${DEB}" ]; then
+            echo "No .deb found in linux-bundles" >&2
+            ls -laR linux-bundles >&2 || true
+            exit 1
+          fi
+          DEB_BASENAME="$(basename "${DEB}")"
+          mkdir -p arch-build
+          cp packaging/arch/PKGBUILD packaging/arch/qmonitor.install arch-build/
+          cp "${DEB}" "arch-build/${DEB_BASENAME}"
+          sed -i "s/^pkgver=.*/pkgver=${ARCH_PKGVER}/" arch-build/PKGBUILD
+          sed -i "s|^source=.*|source=(\"${DEB_BASENAME}\")|" arch-build/PKGBUILD
+
+          docker run --rm \
+            -v "$PWD/arch-build:/pkg" \
+            -w /pkg \
+            archlinux:base-devel \
+            bash -c '
+              set -euo pipefail
+              pacman -Syu --noconfirm
+              pacman -S --noconfirm --needed base-devel
+              useradd -m builder
+              echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+              chown -R builder:builder /pkg
+              su builder -s /bin/bash -c "cd /pkg && makepkg -f --noconfirm"
+            '
+
+          mkdir -p dist-out
+          cp arch-build/*.pkg.tar.zst dist-out/
+          ls -la dist-out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-bundles
+          path: dist-out/*
+          if-no-files-found: error
+          retention-days: 14

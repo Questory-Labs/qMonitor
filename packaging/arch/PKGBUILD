@@ -1,0 +1,48 @@
+# Maintainer: Questory Labs <https://github.com/Questory-Labs>
+# Repackages the official .deb into an Arch package (CI / local makepkg).
+# For AUR: point source= at the GitHub Release .deb URL and set sha256sums.
+
+pkgname=qmonitor
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Lightweight cross-platform game session monitor for Questory"
+arch=('x86_64')
+url="https://github.com/Questory-Labs/qMonitor"
+license=('MIT')
+depends=(
+  'cairo'
+  'desktop-file-utils'
+  'gdk-pixbuf2'
+  'glib2'
+  'gtk3'
+  'hicolor-icon-theme'
+  'libsoup'
+  'pango'
+  'webkit2gtk-4.1'
+)
+options=('!strip' '!debug')
+install=${pkgname}.install
+# CI copies the built .deb next to this PKGBUILD and rewrites source= / pkgver=.
+source=("${pkgname}_${pkgver}_amd64.deb")
+sha256sums=('SKIP')
+
+package() {
+  cd "${srcdir}"
+  # makepkg may leave the .deb intact or already unpack control/data tarballs
+  if ! compgen -G 'data.tar.*' >/dev/null; then
+    local deb
+    deb=$(find . -maxdepth 1 -name '*.deb' -print -quit)
+    if [[ -z "${deb}" ]]; then
+      echo "error: no .deb found in srcdir" >&2
+      return 1
+    fi
+    bsdtar -xf "${deb}" -C "${srcdir}"
+  fi
+  local data
+  data=$(find . -maxdepth 1 -name 'data.tar.*' -print -quit)
+  if [[ -z "${data}" ]]; then
+    echo "error: data.tar.* missing inside .deb" >&2
+    return 1
+  fi
+  bsdtar -xf "${data}" -C "${pkgdir}"
+}

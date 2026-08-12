@@ -1,0 +1,16 @@
+{
+  "baseUrl": "https://app.questorylabs.com",
+  "apiRoot": null,
+  "webOrigin": null,
+  "service": null,
+  "dbPath": null,
+  "pollIntervalSecs": 3,
+  "retentionAckedDays": 30,
+  "catalogPath": "catalogs/games.example.json",
+  "detectableUrl": null,
+  "steamPathOverride": null,
+  "startAtLogin": false,
+  "minimizeToTray": false,
+  "closeToTray": false,
+  "devAccessToken": null
+}

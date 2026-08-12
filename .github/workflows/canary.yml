@@ -1,0 +1,79 @@
+name: canary
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: canary-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+      canary_version: ${{ steps.meta.outputs.canary_version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          BASE="$(node -p "require('./package.json').version")"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "canary_version=${BASE}-canary.${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: meta
+    uses: ./.github/workflows/build-artifacts.yml
+    with:
+      version: ${{ needs.meta.outputs.canary_version }}
+
+  publish:
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: "*-bundles"
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Clear previous canary release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Filenames change with each SHA; drop the old release so assets do not accumulate.
+          if gh release view canary >/dev/null 2>&1; then
+            gh release delete canary --yes --cleanup-tag
+          fi
+
+      - name: Publish canary prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: canary
+          target_commitish: ${{ github.sha }}
+          name: qMonitor canary (${{ needs.meta.outputs.short_sha }})
+          body: |
+            Rolling canary build from `main`.
+
+            - Commit: `${{ github.sha }}`
+            - Version: `${{ needs.meta.outputs.canary_version }}`
+
+            Assets are replaced on each merge to `main`.
+          prerelease: true
+          make_latest: false
+          files: artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

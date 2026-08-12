@@ -1,0 +1,299 @@
+/* Questory Q-mark construction animation (shared once per page). */
+
+@keyframes qc-dot {
+  0% {
+    opacity: 0;
+    transform: scale(0);
+  }
+  4% {
+    opacity: 0.9;
+    transform: scale(1.4);
+  }
+  8% {
+    opacity: 0.7;
+    transform: scale(1);
+  }
+  48% {
+    opacity: 0.7;
+  }
+  56% {
+    opacity: 0;
+    transform: scale(0);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0);
+  }
+}
+
+@keyframes qc-cross-v {
+  0%,
+  6% {
+    opacity: 0;
+    transform: scaleY(0);
+  }
+  16%,
+  48% {
+    opacity: 0.35;
+    transform: scaleY(1);
+  }
+  56%,
+  100% {
+    opacity: 0;
+    transform: scaleY(0);
+  }
+}
+
+@keyframes qc-cross-h {
+  0%,
+  8% {
+    opacity: 0;
+    transform: scaleX(0);
+  }
+  18%,
+  48% {
+    opacity: 0.35;
+    transform: scaleX(1);
+  }
+  56%,
+  100% {
+    opacity: 0;
+    transform: scaleX(0);
+  }
+}
+
+@keyframes qc-diag {
+  0%,
+  10% {
+    opacity: 0;
+    transform: rotate(45deg) scale(0);
+  }
+  20%,
+  46% {
+    opacity: 0.2;
+    transform: rotate(45deg) scale(1);
+  }
+  54%,
+  100% {
+    opacity: 0;
+    transform: rotate(45deg) scale(0);
+  }
+}
+
+@keyframes qc-diamond {
+  0%,
+  12% {
+    opacity: 0;
+    transform: rotate(0deg) scale(0);
+  }
+  22%,
+  46% {
+    opacity: 0.28;
+    transform: rotate(45deg) scale(1);
+  }
+  54%,
+  100% {
+    opacity: 0;
+    transform: rotate(90deg) scale(0);
+  }
+}
+
+@keyframes qc-guide {
+  0%,
+  14% {
+    opacity: 0;
+  }
+  22%,
+  48% {
+    opacity: 0.2;
+  }
+  56%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes qc-tick {
+  0%,
+  16% {
+    opacity: 0;
+    transform: scale(0);
+  }
+  24%,
+  48% {
+    opacity: 0.45;
+    transform: scale(1);
+  }
+  56%,
+  100% {
+    opacity: 0;
+    transform: scale(0);
+  }
+}
+
+@keyframes qc-arc {
+  0%,
+  22% {
+    stroke-dashoffset: var(--qc-circ);
+    opacity: 0;
+  }
+  24% {
+    stroke-dashoffset: var(--qc-circ);
+    opacity: 1;
+  }
+  52%,
+  76% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+  88%,
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 0;
+  }
+}
+
+@keyframes qc-tail {
+  0%,
+  38% {
+    stroke-dashoffset: var(--qc-tail-len);
+    opacity: 0;
+  }
+  40% {
+    stroke-dashoffset: var(--qc-tail-len);
+    opacity: 1;
+  }
+  52%,
+  76% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+  88%,
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 0;
+  }
+}
+
+@keyframes qc-glow {
+  0%,
+  50% {
+    filter: drop-shadow(0 0 0 transparent);
+  }
+  58% {
+    filter: drop-shadow(0 0 10px var(--qc-glow));
+  }
+  68% {
+    filter: drop-shadow(0 0 3px var(--qc-glow));
+  }
+  76% {
+    filter: drop-shadow(0 0 7px var(--qc-glow));
+  }
+  86%,
+  100% {
+    filter: drop-shadow(0 0 0 transparent);
+  }
+}
+
+@keyframes qc-bang {
+  0%,
+  50% {
+    opacity: 0;
+    transform: scale(0.3);
+  }
+  56% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+  60% {
+    transform: scale(1);
+  }
+  76% {
+    opacity: 1;
+  }
+  88%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes qc-shake {
+  0%,
+  52% {
+    transform: translateX(0);
+  }
+  54% {
+    transform: translateX(-3px);
+  }
+  56% {
+    transform: translateX(3px);
+  }
+  58% {
+    transform: translateX(-2px);
+  }
+  60% {
+    transform: translateX(2px);
+  }
+  62% {
+    transform: translateX(-1px);
+  }
+  64%,
+  100% {
+    transform: translateX(0);
+  }
+}
+
+.qc-root {
+  --qc-dur: 4500ms;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.qc-anim-dot {
+  animation: qc-dot var(--qc-dur) ease-in-out infinite;
+}
+.qc-anim-cross-v {
+  animation: qc-cross-v var(--qc-dur) ease-in-out infinite;
+}
+.qc-anim-cross-h {
+  animation: qc-cross-h var(--qc-dur) ease-in-out infinite;
+}
+.qc-anim-diag {
+  animation: qc-diag var(--qc-dur) ease-in-out infinite;
+}
+.qc-anim-diamond {
+  animation: qc-diamond var(--qc-dur) ease-in-out infinite;
+}
+.qc-anim-guide {
+  animation: qc-guide var(--qc-dur) ease-in-out infinite;
+}
+.qc-anim-tick {
+  animation: qc-tick var(--qc-dur) ease-in-out infinite;
+}
+.qc-anim-arc {
+  animation: qc-arc var(--qc-dur) ease-in-out infinite;
+}
+.qc-anim-tail {
+  animation: qc-tail var(--qc-dur) ease-in-out infinite;
+}
+.qc-anim-glow {
+  animation: qc-glow var(--qc-dur) ease-in-out infinite;
+}
+.qc-anim-bang {
+  animation: qc-bang var(--qc-dur) ease-in-out infinite;
+}
+.qc-anim-shake {
+  animation: qc-shake var(--qc-dur) ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qc-root,
+  .qc-root * {
+    animation: none !important;
+  }
+  .qc-scaffold {
+    display: none;
+  }
+}

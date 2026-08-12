@@ -1,0 +1,71 @@
+name: release
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          # package.json is the sole version source; Cargo/tauri are synced at build time.
+          PKG="$(node -p "require('./package.json').version")"
+          echo "version=${PKG}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${PKG}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${PKG} as v${PKG}"
+
+
+  build:
+    needs: version
+    uses: ./.github/workflows/build-artifacts.yml
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: "*-bundles"
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: qMonitor ${{ needs.version.outputs.tag }}
+          body: |
+            Stable release `${{ needs.version.outputs.tag }}` from the `release` branch.
+
+            | Platform | Artifacts |
+            |----------|-----------|
+            | Windows | NSIS (`*-setup.exe`) + MSI |
+            | Linux | AppImage + `.deb` |
+            | Arch | `.pkg.tar.zst` (`pacman -U`) |
+          draft: false
+          prerelease: false
+          files: artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

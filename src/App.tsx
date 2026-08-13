@@ -1,13 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { useCallback, useEffect, useState } from "react";
 import { QMark } from "./components/QMark";
-import { UpdateBanner } from "./components/UpdateBanner";
 import {
-  UpdateSettings,
-  type UpdateChannel,
-} from "./components/UpdateSettings";
+  Settings,
+  type AppConfig,
+  type AuthState,
+} from "./components/Settings";
+import { UpdateBanner } from "./components/UpdateBanner";
 import "./App.css";
 
 type Tab = "home" | "games" | "settings";
@@ -51,37 +51,12 @@ interface HomeState {
   pendingDetections: PendingDetection[];
 }
 
-interface AppConfig {
-  baseUrl?: string;
-  apiRoot?: string;
-  webOrigin?: string;
-  service?: "fe" | "be";
-  dbPath?: string;
-  pollIntervalSecs: number;
-  retentionAckedDays: number;
-  catalogPath?: string;
-  detectableUrl?: string;
-  steamPathOverride?: string;
-  startAtLogin: boolean;
-  minimizeToTray: boolean;
-  closeToTray: boolean;
-  updateChannel: UpdateChannel;
-  devAccessToken?: string;
-}
-
 interface TrackableGame {
   id: string;
   title: string;
   steamAppId?: number;
   source: string;
   trackingEnabled: boolean;
-}
-
-interface AuthState {
-  baseUrl: string;
-  webhookUrl: string;
-  hasAccessToken: boolean;
-  hasSessionToken: boolean;
 }
 
 function BrandMark({ size = "sm" }: { size?: "sm" | "md" }) {
@@ -153,7 +128,6 @@ function App() {
   );
   const [message, setMessage] = useState<string | null>(null);
   const [messageIsError, setMessageIsError] = useState(false);
-  const [autostart, setAutostart] = useState(false);
   const [loginPhase, setLoginPhase] = useState<"idle" | "waiting">("idle");
   const [showManualAuth, setShowManualAuth] = useState(false);
   const [testingUrl, setTestingUrl] = useState(false);
@@ -184,11 +158,6 @@ function App() {
       setAuth(a);
       setOnboarded(o);
       setGames(g);
-      try {
-        setAutostart(await isEnabled());
-      } catch {
-        /* plugin may be unavailable in browser preview */
-      }
     } catch (e) {
       showToast(String(e), true);
     }
@@ -504,14 +473,14 @@ function App() {
                       <div className="live-timer" aria-live="polite">
                         {formatLiveClock(elapsed)}
                       </div>
-                      <div className="meta">
-                        Started{" "}
-                        {new Date(home.active.startedAt).toLocaleString()}
-                      </div>
-                      <div className="active-session-actions">
+                      <div className="active-session-meta">
+                        <div className="meta">
+                          Started{" "}
+                          {new Date(home.active.startedAt).toLocaleString()}
+                        </div>
                         <button
                           type="button"
-                          className="btn btn-ghost btn-sm"
+                          className="link-quiet"
                           onClick={async () => {
                             const session = home.active;
                             if (!session) return;
@@ -685,262 +654,23 @@ function App() {
               )}
 
               {tab === "settings" && (
-                <section className="panel">
-                  <UpdateSettings
-                    channel={config.updateChannel ?? "stable"}
-                    onChannelChange={(updateChannel) =>
-                      saveSettings({ ...config, updateChannel })
-                    }
-                    showToast={showToast}
-                  />
-                  <h2 className="section-label">Account</h2>
-                  {signedIn ? (
-                    <div className="account-card">
-                      <p className="account-status">
-                        <span className="dot on" />
-                        Signed in
-                      </p>
-                      <p className="meta">
-                        {auth?.webhookUrl
-                          ? `Webhook ready`
-                          : "Webhook not configured"}
-                      </p>
-                      <div className="actions">
-                        <button
-                          type="button"
-                          className="btn btn-secondary"
-                          onClick={async () => {
-                            await invoke("sign_out");
-                            showToast("Signed out");
-                            await refresh();
-                          }}
-                        >
-                          Sign out
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      <p className="meta">Not signed in</p>
-                      <div className="actions">
-                        <button
-                          type="button"
-                          className="btn btn-primary"
-                          onClick={onStartLogin}
-                        >
-                          Log in with Questory
-                        </button>
-                      </div>
-                    </>
-                  )}
-
-                  <label className="field">
-                    <span>Base URL</span>
-                    <input
-                      value={config.baseUrl ?? ""}
-                      onChange={(e) =>
-                        setConfig({ ...config, baseUrl: e.target.value })
-                      }
-                    />
-                  </label>
-                  {!signedIn && loginPhase === "waiting" ? (
-                    <div className="login-wait">
-                      <QMark variant="loading" />
-                      <p className="lede">
-                        Waiting on <code>127.0.0.1:58473</code>
-                      </p>
-                      <div
-                        className="actions"
-                        style={{ justifyContent: "center" }}
-                      >
-                        <button
-                          type="button"
-                          className="btn btn-secondary"
-                          onClick={onCancelLogin}
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          onClick={() => setShowManualAuth((v) => !v)}
-                        >
-                          Paste callback URL
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
-                  {!signedIn &&
-                    (showManualAuth || loginPhase === "waiting") && (
-                      <div className="manual-auth">
-                        <label className="field">
-                          <span>Callback URL (with code=)</span>
-                          <input
-                            value={callbackUrl}
-                            onChange={(e) => setCallbackUrl(e.target.value)}
-                            placeholder="Full callback URL containing code="
-                          />
-                        </label>
-                        <div className="actions">
-                          <button
-                            type="button"
-                            className="btn btn-primary"
-                            onClick={onCompleteLogin}
-                          >
-                            Complete login
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                  <h2 className="section-label">Local database</h2>
-                  <label className="field">
-                    <span>Database path (optional)</span>
-                    <input
-                      value={config.dbPath ?? ""}
-                      onChange={(e) =>
-                        setConfig({ ...config, dbPath: e.target.value })
-                      }
-                      placeholder="Default: config dir / qmonitor.db"
-                    />
-                  </label>
-                  <div className="actions">
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={async () => {
-                        try {
-                          const path = await invoke<string>("open_db");
-                          showToast(`Opened ${path}`);
-                          await refresh();
-                        } catch (e) {
-                          showToast(String(e), true);
-                        }
-                      }}
-                    >
-                      Open / reconnect DB
-                    </button>
-                  </div>
-
-                  <h2 className="section-label">Monitor</h2>
-                  <label className="field">
-                    <span>Poll interval (seconds)</span>
-                    <input
-                      type="number"
-                      min={1}
-                      value={config.pollIntervalSecs}
-                      onChange={(e) =>
-                        setConfig({
-                          ...config,
-                          pollIntervalSecs: Number(e.target.value) || 3,
-                        })
-                      }
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Retention for synced sessions</span>
-                    <select
-                      value={config.retentionAckedDays}
-                      onChange={(e) =>
-                        setConfig({
-                          ...config,
-                          retentionAckedDays: Number(e.target.value),
-                        })
-                      }
-                    >
-                      <option value={7}>7 days</option>
-                      <option value={30}>30 days</option>
-                    </select>
-                  </label>
-                  <label className="field">
-                    <span>Catalog path</span>
-                    <input
-                      value={config.catalogPath ?? ""}
-                      onChange={(e) =>
-                        setConfig({ ...config, catalogPath: e.target.value })
-                      }
-                      placeholder="catalogs/games.example.json"
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Detectable catalog URL</span>
-                    <input
-                      value={config.detectableUrl ?? ""}
-                      onChange={(e) =>
-                        setConfig({ ...config, detectableUrl: e.target.value })
-                      }
-                      placeholder="https://discord.com/api/v10/applications/detectable"
-                    />
-                  </label>
-                  <label className="field check">
-                    <input
-                      type="checkbox"
-                      checked={autostart}
-                      onChange={async (e) => {
-                        try {
-                          if (e.target.checked) await enable();
-                          else await disable();
-                          setAutostart(await isEnabled());
-                          await saveSettings({
-                            ...config,
-                            startAtLogin: e.target.checked,
-                          });
-                        } catch (err) {
-                          showToast(String(err), true);
-                        }
-                      }}
-                    />
-                    <span>Start with system login</span>
-                  </label>
-                  <label className="field check">
-                    <input
-                      type="checkbox"
-                      checked={config.minimizeToTray}
-                      onChange={async (e) => {
-                        await saveSettings({
-                          ...config,
-                          minimizeToTray: e.target.checked,
-                        });
-                      }}
-                    />
-                    <span>Minimize goes to tray</span>
-                  </label>
-                  <label className="field check">
-                    <input
-                      type="checkbox"
-                      checked={config.closeToTray}
-                      onChange={async (e) => {
-                        await saveSettings({
-                          ...config,
-                          closeToTray: e.target.checked,
-                        });
-                      }}
-                    />
-                    <span>Close goes to tray</span>
-                  </label>
-                  <label className="field">
-                    <span>Dev access token</span>
-                    <input
-                      type="password"
-                      value={config.devAccessToken ?? ""}
-                      onChange={(e) =>
-                        setConfig({
-                          ...config,
-                          devAccessToken: e.target.value,
-                        })
-                      }
-                    />
-                  </label>
-                  <div className="actions">
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      onClick={() => saveSettings(config)}
-                    >
-                      Save settings
-                    </button>
-                  </div>
-                </section>
+                <Settings
+                  config={config}
+                  setConfig={setConfig}
+                  auth={auth}
+                  signedIn={signedIn}
+                  loginPhase={loginPhase}
+                  showManualAuth={showManualAuth}
+                  setShowManualAuth={setShowManualAuth}
+                  callbackUrl={callbackUrl}
+                  setCallbackUrl={setCallbackUrl}
+                  saveSettings={saveSettings}
+                  onStartLogin={onStartLogin}
+                  onCancelLogin={onCancelLogin}
+                  onCompleteLogin={onCompleteLogin}
+                  showToast={showToast}
+                  refresh={refresh}
+                />
               )}
             </main>
           </div>

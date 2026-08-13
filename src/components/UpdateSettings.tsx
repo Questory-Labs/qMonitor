@@ -41,11 +41,24 @@ export function UpdateSettings({
   }
 
   return (
-    <>
+    <section className="settings-card">
       <h2 className="section-label">Updates</h2>
-      <p className="meta">
-        Installed version {version || "…"} · checks GitHub once per day
-      </p>
+      <div className="setting-row">
+        <div className="setting-row-text">
+          <span className="setting-row-label">Version</span>
+          <span className="setting-row-hint">
+            {version || "…"} · checks GitHub once per day
+          </span>
+        </div>
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          disabled={checking}
+          onClick={() => void checkNow()}
+        >
+          {checking ? "Checking…" : "Check now"}
+        </button>
+      </div>
       <label className="field">
         <span>Release channel</span>
         <select
@@ -58,16 +71,6 @@ export function UpdateSettings({
           <option value="canary">Canary (prerelease)</option>
         </select>
       </label>
-      <div className="actions">
-        <button
-          type="button"
-          className="btn btn-secondary"
-          disabled={checking}
-          onClick={() => void checkNow()}
-        >
-          {checking ? "Checking…" : "Check now"}
-        </button>
-      </div>
-    </>
+    </section>
   );
 }

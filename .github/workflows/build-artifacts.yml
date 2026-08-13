@@ -23,7 +23,7 @@ jobs:
       version: ${{ steps.resolve.outputs.version }}
       arch_pkgver: ${{ steps.resolve.outputs.arch_pkgver }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: resolve
         shell: bash
         run: |
@@ -50,7 +50,7 @@ jobs:
             platform: linux
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Sync version from package.json
         shell: bash
@@ -74,11 +74,11 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 9
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -102,7 +102,7 @@ jobs:
             echo "path=${HOME}/.cache/tauri" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ${{ steps.tauri-tools.outputs.path }}
           key: tauri-bundler-tools-${{ matrix.platform }}-nsis-3.11-utils-0.5.3
@@ -151,7 +151,7 @@ jobs:
           find src-tauri/target/release/bundle -type f \( -name '*.AppImage' -o -name '*.deb' \) -print -exec cp -v {} dist-out/ \;
           ls -la dist-out
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.platform }}-bundles
           path: dist-out/*
@@ -162,9 +162,9 @@ jobs:
     needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: linux-bundles
           path: linux-bundles
@@ -198,14 +198,16 @@ jobs:
               useradd -m builder
               echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
               chown -R builder:builder /pkg
-              su builder -s /bin/bash -c "cd /pkg && makepkg -f --noconfirm"
+              # --nodeps: PKGBUILD depends= are runtime (GTK/WebKit) for pacman -U.
+              # This job only unpacks a .deb; installing them in the container is unnecessary.
+              su builder -s /bin/bash -c "cd /pkg && makepkg -f --noconfirm --nodeps"
             '
 
           mkdir -p dist-out
           cp arch-build/*.pkg.tar.zst dist-out/
           ls -la dist-out
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: arch-bundles
           path: dist-out/*

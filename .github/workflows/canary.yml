@@ -18,7 +18,7 @@ jobs:
       short_sha: ${{ steps.meta.outputs.short_sha }}
       canary_version: ${{ steps.meta.outputs.canary_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: meta
         shell: bash
         run: |
@@ -38,9 +38,9 @@ jobs:
     needs: [meta, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           pattern: "*-bundles"

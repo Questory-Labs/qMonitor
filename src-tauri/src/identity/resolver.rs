@@ -5,11 +5,13 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::detect::platform;
+
 use super::catalog::LocalCatalog;
 use super::deny::is_denied;
 use super::detectable::DetectableCatalog;
 use super::fingerprint::fingerprint_process;
-use super::steam_library::{cmdline_has_app_id, parse_reaper_app_ids, SteamLibraryIndex};
+use super::steam_library::SteamLibraryIndex;
 use super::{Confidence, GameIdentity, ManualGame, PendingDetection, ProcessSnapshot};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,43 +70,17 @@ impl IdentityPipeline {
         &self,
         processes: &[ProcessSnapshot],
     ) -> (Vec<GameIdentity>, Vec<PendingDetection>) {
-        let mut identities: Vec<GameIdentity> = Vec::new();
+        let mut identities = platform::detect_steam(processes, &self.steam);
         let mut pending: Vec<PendingDetection> = Vec::new();
 
-        // 1) Steam reapers — authoritative high confidence
         for proc in processes {
             if is_denied(&proc.name) {
-                continue;
-            }
-            let Some(cmd) = &proc.cmdline else {
-                continue;
-            };
-            if !cmd.contains("SteamLaunch AppId=") {
-                continue;
-            }
-            for app_id in parse_reaper_app_ids(cmd) {
-                if !cmdline_has_app_id(cmd, app_id) {
-                    continue;
-                }
-                if let Some(mut id) = self.steam.resolve_app_id(app_id) {
-                    id.exe = Some(proc.name.clone());
-                    push_unique(&mut identities, id);
-                }
-            }
-        }
-
-        // 2) Path under Steam install / catalog / user / crowd / Discord
-        for proc in processes {
-            if is_denied(&proc.name) {
-                continue;
-            }
-            if let Some(id) = self.steam.match_path(proc) {
-                push_unique(&mut identities, id);
                 continue;
             }
 
             let fp = fingerprint_process(proc);
 
+            // Manual / user mappings are ground truth — do not sidecar-skip them.
             if let Some(mapping) = self.user_mappings.get(&fp) {
                 push_unique(
                     &mut identities,
@@ -131,6 +107,13 @@ impl IdentityPipeline {
                 continue;
             }
 
+            // Steam path helpers are not catalog/Discord games.
+            if platform::windows::is_install_sidecar(proc)
+                || platform::linux::is_proton_wrapper(&proc.name)
+            {
+                continue;
+            }
+
             if let Some(id) = self.catalog.match_process(proc) {
                 if id.confidence.allows_auto_track() {
                     push_unique(&mut identities, id);
@@ -148,7 +131,7 @@ impl IdentityPipeline {
 
             if let Some(id) = self.detectable.match_process(proc) {
                 if id.confidence.allows_auto_track() {
-                    push_unique(&mut identities, id);
+                    absorb_discord(&mut identities, id, proc);
                 } else {
                     pending.push(PendingDetection {
                         process_name: proc.name.clone(),
@@ -158,13 +141,9 @@ impl IdentityPipeline {
                         identity_id: Some(id.id),
                     });
                 }
-                continue;
             }
-
-            // No Steam / catalog / Discord match → never surface as a candidate.
         }
 
-        // Prefer high/medium only for auto list; drop ignored identities entirely.
         identities.retain(|i| {
             i.confidence.allows_auto_track() && !self.ignored_identities.contains(&i.id)
         });
@@ -176,6 +155,37 @@ impl IdentityPipeline {
         });
         (identities, pending)
     }
+}
+
+/// Promote a Low steam-path hit when Discord uniquely matches the same Steam SKU
+/// (or the same process when Discord has no SKU). Never promote a coincidental
+/// install-dir hit to a different Discord game.
+fn absorb_discord(
+    identities: &mut Vec<GameIdentity>,
+    discord: GameIdentity,
+    proc: &ProcessSnapshot,
+) {
+    if let Some(sid) = discord.steam_app_id {
+        if let Some(existing) = identities.iter_mut().find(|i| i.steam_app_id == Some(sid)) {
+            if existing.confidence == Confidence::Low {
+                existing.confidence = Confidence::Medium;
+            }
+            return;
+        }
+        push_unique(identities, discord);
+        return;
+    }
+    if let Some(existing) = identities.iter_mut().find(|i| {
+        i.source == "steam-path"
+            && i.exe
+                .as_ref()
+                .map(|e| e.eq_ignore_ascii_case(&proc.name))
+                .unwrap_or(false)
+    }) {
+        existing.confidence = Confidence::Medium;
+        return;
+    }
+    push_unique(identities, discord);
 }
 
 fn push_unique(list: &mut Vec<GameIdentity>, id: GameIdentity) {

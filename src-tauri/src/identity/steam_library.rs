@@ -57,17 +57,13 @@ impl SteamLibraryIndex {
         })
     }
 
-    /// Medium confidence: process path under a unique install dir.
+    /// Path under a unique install dir. Uncorroborated hits are **Low** (not auto-track).
     pub fn match_path(&self, proc: &ProcessSnapshot) -> Option<GameIdentity> {
         let path = proc.exe_path.as_deref()?;
-        let path_l = path.replace('\\', "/").to_ascii_lowercase();
         let mut hits: Vec<&SteamGame> = self
             .games
             .values()
-            .filter(|g| {
-                let install = g.install_path.to_string_lossy().replace('\\', "/");
-                path_l.starts_with(&install.to_ascii_lowercase())
-            })
+            .filter(|g| path_is_under_install(path, &g.install_path))
             .collect();
         if hits.len() != 1 {
             return None;
@@ -78,11 +74,25 @@ impl SteamLibraryIndex {
             title: g.title.clone(),
             steam_app_id: Some(g.app_id),
             exe: Some(proc.name.clone()),
-            confidence: Confidence::Medium,
+            confidence: Confidence::Low,
             source: "steam-path".into(),
             fingerprint: None,
         })
     }
+}
+
+/// Directory-boundary prefix: `install` or `install/...`, not `install-other`.
+pub fn path_is_under_install(exe_path: &str, install_path: &Path) -> bool {
+    let path = exe_path.replace('\\', "/").to_ascii_lowercase();
+    let install = install_path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let install = install.trim_end_matches('/');
+    if install.is_empty() {
+        return false;
+    }
+    path == install || path.starts_with(&format!("{install}/"))
 }
 
 pub fn detect_steam_root() -> Option<PathBuf> {
@@ -245,6 +255,47 @@ mod tests {
         };
         let id = index.match_path(&proc).unwrap();
         assert_eq!(id.steam_app_id, Some(570));
-        assert_eq!(id.confidence, Confidence::Medium);
+        assert_eq!(id.confidence, Confidence::Low);
+        assert_eq!(id.source, "steam-path");
+    }
+
+    #[test]
+    fn path_boundary_portal_vs_portal_2() {
+        let portal = PathBuf::from(r"D:\Steam\steamapps\common\Portal");
+        let portal2_exe =
+            r"D:\Steam\steamapps\common\Portal 2\bin\portal2.exe";
+        assert!(!path_is_under_install(portal2_exe, &portal));
+        assert!(path_is_under_install(
+            r"D:\Steam\steamapps\common\Portal\portal.exe",
+            &portal
+        ));
+    }
+
+    #[test]
+    fn overlapping_installs_yield_no_path_match() {
+        let mut index = SteamLibraryIndex::default();
+        index.games.insert(
+            1,
+            SteamGame {
+                app_id: 1,
+                title: "Nested".into(),
+                install_path: PathBuf::from(r"D:\Steam\steamapps\common\Game"),
+            },
+        );
+        index.games.insert(
+            2,
+            SteamGame {
+                app_id: 2,
+                title: "Nested Too".into(),
+                install_path: PathBuf::from(r"D:\Steam\steamapps\common\Game"),
+            },
+        );
+        let proc = ProcessSnapshot {
+            pid: 1,
+            name: "game.exe".into(),
+            exe_path: Some(r"D:\Steam\steamapps\common\Game\game.exe".into()),
+            cmdline: None,
+        };
+        assert!(index.match_path(&proc).is_none());
     }
 }

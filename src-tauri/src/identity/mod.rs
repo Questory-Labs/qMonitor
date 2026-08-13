@@ -5,6 +5,9 @@ pub mod fingerprint;
 pub mod resolver;
 pub mod steam_library;
 
+#[cfg(test)]
+pub mod fixtures;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

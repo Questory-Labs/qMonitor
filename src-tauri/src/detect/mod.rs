@@ -1,23 +1,30 @@
+pub mod platform;
 pub mod process;
 pub mod steam_reaper;
 
-use crate::identity::ProcessSnapshot;
+use crate::identity::{Confidence, GameIdentity, ProcessSnapshot};
 
 pub fn snapshot_processes() -> Vec<ProcessSnapshot> {
     process::list_processes()
 }
 
+pub fn foreground_pid() -> Option<u32> {
+    platform::foreground_pid()
+}
+
 pub fn primary_identity<'a>(
-    identities: &'a [crate::identity::GameIdentity],
+    identities: &'a [GameIdentity],
     foreground_pid: Option<u32>,
     processes: &[ProcessSnapshot],
-) -> Option<&'a crate::identity::GameIdentity> {
+) -> Option<&'a GameIdentity> {
     if identities.is_empty() {
         return None;
     }
+    if let Some(high) = identities.iter().find(|i| i.confidence == Confidence::High) {
+        return Some(high);
+    }
     if let Some(pid) = foreground_pid {
         if let Some(proc) = processes.iter().find(|p| p.pid == pid) {
-            // Prefer identity whose exe matches foreground process name
             if let Some(id) = identities.iter().find(|i| {
                 i.exe
                     .as_ref()
@@ -28,38 +35,39 @@ pub fn primary_identity<'a>(
             }
         }
     }
-    // Prefer Steam high-confidence
-    identities
-        .iter()
-        .find(|i| i.source == "steam")
-        .or_else(|| identities.first())
+    identities.first()
 }
 
-#[cfg(target_os = "windows")]
-pub fn foreground_pid() -> Option<u32> {
-    windows_foreground_pid()
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::{Confidence, GameIdentity, ProcessSnapshot};
 
-#[cfg(not(target_os = "windows"))]
-pub fn foreground_pid() -> Option<u32> {
-    None
-}
-
-#[cfg(target_os = "windows")]
-fn windows_foreground_pid() -> Option<u32> {
-    use std::mem::MaybeUninit;
-    #[link(name = "user32")]
-    extern "system" {
-        fn GetForegroundWindow() -> isize;
-        fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
-    }
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd == 0 {
-            return None;
+    fn id(key: &str, exe: &str, confidence: Confidence) -> GameIdentity {
+        GameIdentity {
+            id: key.into(),
+            title: key.into(),
+            steam_app_id: None,
+            exe: Some(exe.into()),
+            confidence,
+            source: "test".into(),
+            fingerprint: None,
         }
-        let mut pid = MaybeUninit::<u32>::uninit();
-        GetWindowThreadProcessId(hwnd, pid.as_mut_ptr());
-        Some(pid.assume_init())
+    }
+
+    #[test]
+    fn high_beats_foreground_medium() {
+        let identities = vec![
+            id("steam:1", "game.exe", Confidence::Medium),
+            id("steam:2", "reaper", Confidence::High),
+        ];
+        let procs = vec![ProcessSnapshot {
+            pid: 10,
+            name: "game.exe".into(),
+            exe_path: None,
+            cmdline: None,
+        }];
+        let primary = primary_identity(&identities, Some(10), &procs).unwrap();
+        assert_eq!(primary.id, "steam:2");
     }
 }

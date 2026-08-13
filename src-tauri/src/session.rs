@@ -11,7 +11,6 @@ use crate::auth;
 use crate::config::AppConfig;
 use crate::db::{SessionRow, TursoDb};
 use crate::detect::{foreground_pid, primary_identity, snapshot_processes};
-use crate::detect::steam_reaper::running_steam_app_ids;
 use crate::identity::detectable::{self, DetectableCatalog, DETECTABLE_MAX_AGE};
 use crate::identity::resolver::{parse_exe_input, IdentityPipeline, UserMapping};
 use crate::identity::{ManualGame, PendingDetection, TrackableGame};
@@ -219,7 +218,6 @@ impl AppState {
 
     pub async fn tick(&self) {
         let processes = snapshot_processes();
-        let _steam_ids = running_steam_app_ids(&processes);
         let (identities, pending) = {
             let pipe = self.pipeline.read().await;
             pipe.resolve_running(&processes)
@@ -643,6 +641,7 @@ mod tests {
         assert!(db.list_sessions(10).await.unwrap().is_empty());
     }
 
+    /// Game quit (`primary = None`) ends and queues push on that tick — no end-grace.
     #[tokio::test]
     async fn reconcile_warm_idle_ends_and_queues_push() {
         let dir = tempdir().unwrap();

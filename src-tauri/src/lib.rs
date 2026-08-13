@@ -8,6 +8,7 @@ mod oauth_loopback;
 mod pkce;
 mod push;
 mod session;
+mod update_check;
 
 use std::sync::Arc;
 
@@ -24,6 +25,7 @@ use config::AppConfig;
 use identity::{PendingDetection, TrackableGame};
 use oauth_loopback::LoopbackGuard;
 use session::{list_trackable_games, AppState, HomeState};
+use update_check::PendingUpdate;
 
 struct LoginListener(Arc<Mutex<Option<LoopbackGuard>>>);
 struct LoginAttemptState(Arc<Mutex<Option<LoginAttempt>>>);
@@ -35,10 +37,17 @@ async fn get_config(state: State<'_, Arc<AppState>>) -> Result<AppConfig, String
 
 #[tauri::command]
 async fn save_config(
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     mut config: AppConfig,
 ) -> Result<AppConfig, String> {
-    let prev_url = state.config.read().await.resolved_detectable_url();
+    let (prev_url, prev_channel) = {
+        let current = state.config.read().await;
+        (
+            current.resolved_detectable_url(),
+            current.update_channel,
+        )
+    };
     if config.base_url.as_ref().is_some_and(|u| !u.trim().is_empty()) {
         auth::detect_and_apply(&mut config).await?;
     } else {
@@ -48,6 +57,8 @@ async fn save_config(
     }
     let next_url = config.resolved_detectable_url();
     let url_changed = prev_url != next_url;
+    let channel_changed = prev_channel != config.update_channel;
+    let next_channel = config.update_channel;
     config.save()?;
     *state.config.write().await = config.clone();
     state.reload_pipeline().await;
@@ -57,6 +68,14 @@ async fn save_config(
     // Local session DB is independent of Questory URL — always ensure it's open.
     if let Err(e) = state.connect_db().await {
         tracing::error!(%e, "failed to open local database after save_config");
+    }
+    if channel_changed {
+        tauri::async_runtime::spawn(async move {
+            match update_check::check(next_channel, true).await {
+                Ok(pending) => emit_update_event(&app, pending.as_ref()),
+                Err(e) => tracing::warn!(%e, "update check after channel change failed"),
+            }
+        });
     }
     Ok(config)
 }
@@ -236,6 +255,44 @@ fn login_listening() -> bool {
     oauth_loopback::is_listening()
 }
 
+#[tauri::command]
+fn get_app_version() -> String {
+    update_check::installed_version().to_string()
+}
+
+#[tauri::command]
+async fn check_for_updates(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    force: bool,
+) -> Result<Option<PendingUpdate>, String> {
+    let channel = state.config.read().await.update_channel;
+    let pending = update_check::check(channel, force).await?;
+    emit_update_event(&app, pending.as_ref());
+    Ok(pending)
+}
+
+#[tauri::command]
+fn dismiss_update() -> Result<(), String> {
+    update_check::dismiss_current()
+}
+
+#[tauri::command]
+fn open_release_url(url: String) -> Result<(), String> {
+    update_check::open_release_url(&url)
+}
+
+fn emit_update_event(app: &tauri::AppHandle, pending: Option<&PendingUpdate>) {
+    match pending {
+        Some(p) => {
+            let _ = app.emit("qmonitor://update-available", p);
+        }
+        None => {
+            let _ = app.emit("qmonitor://update-clear", ());
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -317,6 +374,22 @@ pub fn run() {
                 }
             });
 
+            let update_state = app_state.clone();
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let channel = update_state.config.read().await.update_channel;
+                    match update_check::check(channel, false).await {
+                        Ok(pending) => emit_update_event(&update_handle, pending.as_ref()),
+                        Err(e) => tracing::warn!(%e, "update check failed"),
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(
+                        update_check::CHECK_INTERVAL_SECS,
+                    ))
+                    .await;
+                }
+            });
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -368,7 +441,11 @@ pub fn run() {
             add_manual_game,
             open_db,
             is_onboarded,
-            login_listening
+            login_listening,
+            get_app_version,
+            check_for_updates,
+            dismiss_update,
+            open_release_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running qMonitor");

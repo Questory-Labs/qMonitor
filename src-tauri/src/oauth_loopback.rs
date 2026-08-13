@@ -96,7 +96,7 @@ pub async fn start_listener(
                                     "qmonitor://auth-success",
                                     serde_json::json!({ "ok": true }),
                                 );
-                                let ok = SUCCESS_HTML;
+                                let ok = success_html();
                                 let resp = format!(
                                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                                     ok.len(),
@@ -125,7 +125,7 @@ pub async fn start_listener(
                     }
                 }
 
-                let body = CALLBACK_HTML;
+                let body = callback_html();
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
@@ -151,7 +151,7 @@ pub async fn start_listener(
                                     "qmonitor://auth-success",
                                     serde_json::json!({ "ok": true }),
                                 );
-                                let ok = SUCCESS_HTML;
+                                let ok = success_html();
                                 let resp = format!(
                                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                                     ok.len(),
@@ -226,61 +226,115 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-const CALLBACK_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>qMonitor login</title>
-  <style>
-    body { font-family: system-ui, sans-serif; background:#0f1419; color:#e8eef4;
-           display:grid; place-items:center; min-height:100vh; margin:0; }
-    .box { text-align:center; max-width:28rem; padding:2rem; }
-    .q { font-size:3rem; font-weight:800; color:#3d9cf0;
-         animation: pulse 1.2s ease-in-out infinite; }
-    @keyframes pulse { 50% { opacity:0.45; transform:scale(1.06); } }
-    p { color:#8b9aab; }
-  </style>
-</head>
-<body>
-  <div class="box">
-    <div class="q">q</div>
-    <p id="msg">Finishing login…</p>
-  </div>
-  <script>
-    (async () => {
-      const query = location.search.startsWith('?') ? location.search.slice(1) : '';
-      const params = new URLSearchParams(query);
-      const code = params.get('code');
-      const state = params.get('state');
-      const err = params.get('error');
-      const el = document.getElementById('msg');
-      if (err) {
-        el.textContent = 'Authorization declined or failed (' + err + ').';
-        return;
-      }
-      if (!code || !state) {
-        el.textContent = 'No authorization code in this URL. Copy the full URL into qMonitor.';
-        return;
-      }
-      try {
-        const res = await fetch('/callback/complete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code, state })
-        });
-        if (!res.ok) throw new Error('bad status');
-        el.textContent = 'Logged in — you can close this tab and return to qMonitor.';
-      } catch (e) {
-        el.textContent = 'Could not reach qMonitor. Paste the callback URL into the app.';
-      }
-    })();
-  </script>
-</body>
-</html>"#;
+const LOOPBACK_CSS: &str = r#"
+:root { --bg-0:#101012; --ink:#f2efe8; --muted:#9a958c; --accent:#7dd3c0; --radius:8px; }
+body { font-family:system-ui,sans-serif; background:var(--bg-0); color:var(--ink);
+       display:grid; place-items:center; min-height:100vh; margin:0; }
+.box { text-align:center; max-width:28rem; padding:2rem; }
+.mark { width:4.5rem; height:4.5rem; border-radius:20%; }
+.mark.pulse { animation:pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity:0.55; } }
+p { color:var(--muted); margin:1rem 0 0; }
+.btn { display:inline-flex; align-items:center; justify-content:center;
+       margin-top:1.25rem; padding:0.5rem 1rem; border-radius:var(--radius);
+       border:1px solid var(--accent); background:var(--accent); color:var(--bg-0);
+       font-size:0.875rem; font-weight:600; cursor:pointer; }
+"#;
 
-const SUCCESS_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"/><title>qMonitor</title>
-<style>body{font-family:system-ui;background:#0f1419;color:#e8eef4;display:grid;place-items:center;min-height:100vh;margin:0}
-.q{font-size:3rem;font-weight:800;color:#3ecf8e}</style></head>
-<body><div style="text-align:center"><div class="q">q</div>
-<p>Login successful. Return to qMonitor.</p></div></body></html>"#;
+const MARK_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" class="mark" role="img" aria-label="qMonitor">
+  <rect width="512" height="512" rx="112" ry="112" fill="#202023"/>
+  <g transform="translate(256 256) scale(0.87) translate(-256 -256)">
+    <g transform="translate(55.15 55.15) scale(1.10059)" fill-rule="evenodd">
+      <path fill="#F2EFE8" d="m323.285 297.021-36.426-39.312c15.271-21.152 24.275-47.127 24.275-75.209 0-71.043-57.591-128.634-128.634-128.634S53.866 111.457 53.866 182.5 111.457 311.134 182.5 311.134c7.314 0 14.478-.629 21.458-1.802l39.737 44.054c-19.121 6.85-39.718 10.6-61.195 10.6-100.232 0-181.486-81.254-181.486-181.486S82.268 1.014 182.5 1.014 363.986 82.268 363.986 182.5c0 43.426-15.261 83.284-40.701 114.521Z"/>
+      <path fill="#EE7016" d="M185 245h64.1L351 353.1l-66.819 1.857z"/>
+    </g>
+  </g>
+</svg>"##;
+
+fn loopback_page(title: &str, inner: &str) -> String {
+    let mut html = String::from(
+        "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"/><title>",
+    );
+    html.push_str(title);
+    html.push_str("</title><style>");
+    html.push_str(LOOPBACK_CSS);
+    html.push_str("</style></head><body><div class=\"box\">");
+    html.push_str(inner);
+    html.push_str("</div></body></html>");
+    html
+}
+
+fn callback_html() -> String {
+    let mark = MARK_SVG.replace(r#"class="mark""#, r#"class="mark pulse""#);
+    loopback_page(
+        "qMonitor login",
+        &format!(
+            r##"{mark}
+<p id="msg">Finishing login…</p>
+<script>
+  (async () => {{
+    const query = location.search.startsWith('?') ? location.search.slice(1) : '';
+    const params = new URLSearchParams(query);
+    const code = params.get('code');
+    const state = params.get('state');
+    const err = params.get('error');
+    const el = document.getElementById('msg');
+    if (err) {{
+      el.textContent = 'Authorization declined or failed (' + err + ').';
+      return;
+    }}
+    if (!code || !state) {{
+      el.textContent = 'No authorization code in this URL. Copy the full URL into qMonitor.';
+      return;
+    }}
+    try {{
+      const res = await fetch('/callback/complete', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ code, state }})
+      }});
+      if (!res.ok) throw new Error('bad status');
+      el.textContent = 'Logged in — you can close this tab and return to qMonitor.';
+    }} catch (e) {{
+      el.textContent = 'Could not reach qMonitor. Paste the callback URL into the app.';
+    }}
+  }})();
+</script>"##
+        ),
+    )
+}
+
+fn success_html() -> String {
+    loopback_page(
+        "qMonitor",
+        &format!(
+            r##"{MARK_SVG}
+<p>Login successful.</p>
+<button class="btn" type="button" onclick="window.close()">Return to qMonitor</button>"##
+        ),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn success_page_uses_qmonitor_mark_and_return_button() {
+        let html = success_html();
+        assert!(html.contains("aria-label=\"qMonitor\""));
+        assert!(html.contains("fill=\"#202023\""));
+        assert!(html.contains("Return to qMonitor"));
+        assert!(html.contains("<button"));
+        assert!(!html.contains("class=\"q\""));
+    }
+
+    #[test]
+    fn callback_page_uses_pulsing_qmonitor_mark() {
+        let html = callback_html();
+        assert!(html.contains("aria-label=\"qMonitor\""));
+        assert!(html.contains("class=\"mark pulse\""));
+        assert!(html.contains("Finishing login…"));
+        assert!(!html.contains(">q</div>"));
+    }
+}

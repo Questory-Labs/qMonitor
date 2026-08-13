@@ -17,6 +17,7 @@ jobs:
     outputs:
       short_sha: ${{ steps.meta.outputs.short_sha }}
       canary_version: ${{ steps.meta.outputs.canary_version }}
+      tag: ${{ steps.meta.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
       - id: meta
@@ -25,8 +26,10 @@ jobs:
           set -euo pipefail
           SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
           BASE="$(node -p "require('./package.json').version")"
+          VERSION="${BASE}-canary.${SHORT_SHA}"
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "canary_version=${BASE}-canary.${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "canary_version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: meta
@@ -49,29 +52,30 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f | sort
 
-      - name: Clear previous canary release
+      - name: Retire leftover rolling canary tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Filenames change with each SHA; drop the old release so assets do not accumulate.
+          # One-shot cleanup of the old reused `canary` tag. Unique v*-canary.*
+          # prereleases are never deleted.
           if gh release view canary >/dev/null 2>&1; then
             gh release delete canary --yes --cleanup-tag
+            echo "Removed leftover rolling tag canary"
           fi
 
       - name: Publish canary prerelease
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: canary
+          tag_name: ${{ needs.meta.outputs.tag }}
           target_commitish: ${{ github.sha }}
           name: qMonitor canary (${{ needs.meta.outputs.short_sha }})
           body: |
-            Rolling canary build from `main`.
+            Canary prerelease from `main`.
 
             - Commit: `${{ github.sha }}`
             - Version: `${{ needs.meta.outputs.canary_version }}`
-
-            Assets are replaced on each merge to `main`.
+            - Tag: `${{ needs.meta.outputs.tag }}`
           prerelease: true
           make_latest: false
           files: artifacts/*

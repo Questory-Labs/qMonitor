@@ -3,6 +3,11 @@ import { listen } from "@tauri-apps/api/event";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { useCallback, useEffect, useState } from "react";
 import { QMark } from "./components/QMark";
+import { UpdateBanner } from "./components/UpdateBanner";
+import {
+  UpdateSettings,
+  type UpdateChannel,
+} from "./components/UpdateSettings";
 import "./App.css";
 
 type Tab = "home" | "games" | "settings";
@@ -60,6 +65,7 @@ interface AppConfig {
   startAtLogin: boolean;
   minimizeToTray: boolean;
   closeToTray: boolean;
+  updateChannel: UpdateChannel;
   devAccessToken?: string;
 }
 
@@ -374,6 +380,7 @@ function App() {
 
   return (
     <div className="shell">
+      <UpdateBanner />
       <div className="scroll-body">
         {needsOnboarding ? (
           <div className="onboard-screen">
@@ -679,6 +686,13 @@ function App() {
 
               {tab === "settings" && (
                 <section className="panel">
+                  <UpdateSettings
+                    channel={config.updateChannel ?? "stable"}
+                    onChannelChange={(updateChannel) =>
+                      saveSettings({ ...config, updateChannel })
+                    }
+                    showToast={showToast}
+                  />
                   <h2 className="section-label">Account</h2>
                   {signedIn ? (
                     <div className="account-card">

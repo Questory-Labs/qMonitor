@@ -21,14 +21,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
           # package.json is the sole version source; Cargo/tauri are synced at build time.
           PKG="$(node -p "require('./package.json').version")"
+          TAG="v${PKG}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Stable tag ${TAG} already exists. Bump package.json; refusing to mutate a shipped release." >&2
+            exit 1
+          fi
           echo "version=${PKG}" >> "$GITHUB_OUTPUT"
-          echo "tag=v${PKG}" >> "$GITHUB_OUTPUT"
-          echo "Releasing ${PKG} as v${PKG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${PKG} as ${TAG}"
 
 
   build:

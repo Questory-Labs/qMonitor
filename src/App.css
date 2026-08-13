@@ -168,6 +168,30 @@ body {
   scrollbar-color: var(--bg-3) transparent;
 }
 
+.update-banner {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem 0.75rem;
+  padding: 0.55rem 0.85rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--accent-dim);
+}
+
+.update-banner p {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--ink);
+}
+
+.update-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
 .scroll-body::-webkit-scrollbar,
 .session-list.compact::-webkit-scrollbar {
   width: 8px;

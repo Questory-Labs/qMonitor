@@ -12,5 +12,6 @@
   "startAtLogin": false,
   "minimizeToTray": false,
   "closeToTray": false,
+  "updateChannel": "stable",
   "devAccessToken": null
 }

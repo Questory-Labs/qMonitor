@@ -21,6 +21,14 @@ pub enum DetectedService {
     Be,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+    Canary,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
@@ -45,6 +53,9 @@ pub struct AppConfig {
     /// When true, closing the window hides it to the system tray (Quit via tray).
     #[serde(default)]
     pub close_to_tray: bool,
+    /// GitHub release channel to poll for updates (stable = Latest, canary = newest prerelease).
+    #[serde(default)]
+    pub update_channel: UpdateChannel,
     /// Dev fallback when device login is unavailable.
     pub dev_access_token: Option<String>,
 }
@@ -65,6 +76,7 @@ impl Default for AppConfig {
             start_at_login: false,
             minimize_to_tray: false,
             close_to_tray: false,
+            update_channel: UpdateChannel::Stable,
             dev_access_token: None,
         }
     }
@@ -156,5 +168,31 @@ impl AppConfig {
             .map(|u| u.trim().to_string())
             .filter(|u| !u.is_empty())
             .unwrap_or_else(|| DEFAULT_DETECTABLE_URL.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_update_channel_defaults_to_stable() {
+        let cfg: AppConfig = serde_json::from_str(
+            r#"{"pollIntervalSecs":3,"retentionAckedDays":30,"startAtLogin":false}"#,
+        )
+        .expect("parse");
+        assert_eq!(cfg.update_channel, UpdateChannel::Stable);
+        assert!(!cfg.minimize_to_tray);
+        assert!(!cfg.close_to_tray);
+    }
+
+    #[test]
+    fn update_channel_canary_roundtrip() {
+        let mut cfg = AppConfig::default();
+        cfg.update_channel = UpdateChannel::Canary;
+        let raw = serde_json::to_string(&cfg).expect("ser");
+        let back: AppConfig = serde_json::from_str(&raw).expect("de");
+        assert_eq!(back.update_channel, UpdateChannel::Canary);
+        assert!(raw.contains("\"updateChannel\":\"canary\""));
     }
 }

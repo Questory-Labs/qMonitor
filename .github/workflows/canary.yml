@@ -15,7 +15,7 @@ jobs:
   meta:
     runs-on: ubuntu-latest
     outputs:
-      short_sha: ${{ steps.meta.outputs.short_sha }}
+      build_number: ${{ steps.meta.outputs.build_number }}
       canary_version: ${{ steps.meta.outputs.canary_version }}
       tag: ${{ steps.meta.outputs.tag }}
     steps:
@@ -24,10 +24,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
           BASE="$(node -p "require('./package.json').version")"
-          VERSION="${BASE}-canary.${SHORT_SHA}"
-          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          VERSION="${BASE}-canary.${BUILD_NUMBER}"
+          echo "build_number=${BUILD_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "canary_version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
 
@@ -69,10 +69,11 @@ jobs:
         with:
           tag_name: ${{ needs.meta.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          name: qMonitor canary (${{ needs.meta.outputs.short_sha }})
+          name: qMonitor canary (${{ needs.meta.outputs.build_number }})
           body: |
             Canary prerelease from `main`.
 
+            - Build: `${{ needs.meta.outputs.build_number }}`
             - Commit: `${{ github.sha }}`
             - Version: `${{ needs.meta.outputs.canary_version }}`
             - Tag: `${{ needs.meta.outputs.tag }}`

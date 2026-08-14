@@ -118,7 +118,7 @@ GitHub Actions publishes installers automatically:
 | Channel | Trigger | Tag / name |
 | :--- | :--- | :--- |
 | **Stable** | Merge / push to `release` | Immutable `v{version}` from `package.json` only — bump that file; `Cargo.toml` / `tauri.conf.json` sync at build. GitHub **Latest** is a badge, not a reused tag. |
-| **Canary** | Merge / push to `main` | Immutable prerelease `v{version}-canary.{shortsha}` (`prerelease`, not Latest). Previous canaries stay on Releases. |
+| **Canary** | Merge / push to `main` | Immutable prerelease `v{version}-canary.{run_number}` (`prerelease`, not Latest). Previous canaries stay on Releases. |
 
 Download from the repo **[Releases](https://github.com/Questory-Labs/qMonitor/releases)** page. In the app, **Settings → Updates** checks that channel once per day and offers a link to the matching tag (no auto-install). Arch example:
 

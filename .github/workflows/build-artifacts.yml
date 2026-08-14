@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       version:
-        description: Optional version override (e.g. 0.1.0-canary.a1b2c3d)
+        description: Optional version override (e.g. 0.1.0-canary.42)
         required: false
         type: string
         default: ""

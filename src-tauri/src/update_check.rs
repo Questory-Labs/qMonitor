@@ -81,7 +81,7 @@ pub fn open_release_url(url: &str) -> Result<(), String> {
 fn is_canary_tag(tag: &str) -> bool {
     let rest = tag.strip_prefix('v').unwrap_or(tag);
     rest.split_once("-canary.")
-        .is_some_and(|(ver, sha)| !ver.is_empty() && !sha.is_empty() && !sha.contains('/'))
+        .is_some_and(|(ver, ident)| !ver.is_empty() && !ident.is_empty() && !ident.contains('/'))
 }
 
 fn version_from_tag(tag: &str) -> &str {
@@ -293,8 +293,8 @@ mod tests {
 
     #[test]
     fn canary_tag_shape() {
-        assert!(is_canary_tag("v0.0.1-canary.a1b2c3d"));
-        assert!(is_canary_tag("0.0.1-canary.deadbee"));
+        assert!(is_canary_tag("v0.0.1-canary.42"));
+        assert!(is_canary_tag("0.0.1-canary.9304232"));
         assert!(!is_canary_tag("canary"));
         assert!(!is_canary_tag("v0.0.1"));
         assert!(!is_canary_tag("v0.0.1-beta.1"));
@@ -304,37 +304,34 @@ mod tests {
     fn stable_semver_newer() {
         assert!(is_newer_stable("v0.0.2", "0.0.1"));
         assert!(!is_newer_stable("v0.0.1", "0.0.1"));
-        assert!(is_newer_stable("v0.0.1", "0.0.1-canary.abc1234"));
-        assert!(!is_newer_stable("v0.0.1", "0.0.2-canary.abc1234"));
+        assert!(is_newer_stable("v0.0.1", "0.0.1-canary.12"));
+        assert!(!is_newer_stable("v0.0.1", "0.0.2-canary.12"));
         assert!(!is_newer_stable("not-a-version", "0.0.1"));
     }
 
     #[test]
     fn canary_identity_differs() {
-        assert!(is_newer_canary("v0.0.1-canary.aaa1111", "0.0.1"));
-        assert!(!is_newer_canary("v0.0.1-canary.aaa1111", "0.0.1-canary.aaa1111"));
-        assert!(is_newer_canary(
-            "v0.0.1-canary.bbb2222",
-            "0.0.1-canary.aaa1111"
-        ));
+        assert!(is_newer_canary("v0.0.1-canary.12", "0.0.1"));
+        assert!(!is_newer_canary("v0.0.1-canary.12", "0.0.1-canary.12"));
+        assert!(is_newer_canary("v0.0.1-canary.13", "0.0.1-canary.12"));
     }
 
     #[test]
     fn pick_newest_canary_prerelease() {
         let list = vec![
             release("v0.0.1", false),
-            release("v0.0.1-canary.bbbbbbb", true),
-            release("v0.0.1-canary.aaaaaaa", true),
+            release("v0.0.1-canary.13", true),
+            release("v0.0.1-canary.12", true),
             release("canary", true),
         ];
         let picked = pick_canary(&list).expect("canary");
-        assert_eq!(picked.tag, "v0.0.1-canary.bbbbbbb");
-        assert_eq!(picked.version, "0.0.1-canary.bbbbbbb");
+        assert_eq!(picked.tag, "v0.0.1-canary.13");
+        assert_eq!(picked.version, "0.0.1-canary.13");
     }
 
     #[test]
     fn pick_stable_skips_prerelease() {
-        assert!(pick_stable(&release("v0.0.1-canary.abc", true)).is_none());
+        assert!(pick_stable(&release("v0.0.1-canary.12", true)).is_none());
         let picked = pick_stable(&release("v0.0.1", false)).expect("stable");
         assert_eq!(picked.version, "0.0.1");
     }
@@ -472,11 +469,11 @@ mod tests {
     fn github_list_fixture() {
         let raw = r#"[
             {"tag_name":"v0.0.2","html_url":"https://github.com/Questory-Labs/qMonitor/releases/tag/v0.0.2","prerelease":false},
-            {"tag_name":"v0.0.2-canary.abc1234","html_url":"https://github.com/Questory-Labs/qMonitor/releases/tag/v0.0.2-canary.abc1234","prerelease":true},
+            {"tag_name":"v0.0.2-canary.12","html_url":"https://github.com/Questory-Labs/qMonitor/releases/tag/v0.0.2-canary.12","prerelease":true},
             {"tag_name":"v0.0.1","html_url":"https://github.com/Questory-Labs/qMonitor/releases/tag/v0.0.1","prerelease":false}
         ]"#;
         let list: Vec<GhRelease> = serde_json::from_str(raw).unwrap();
-        assert_eq!(pick_canary(&list).unwrap().tag, "v0.0.2-canary.abc1234");
+        assert_eq!(pick_canary(&list).unwrap().tag, "v0.0.2-canary.12");
         assert_eq!(pick_stable(&list[0]).unwrap().tag, "v0.0.2");
     }
 }

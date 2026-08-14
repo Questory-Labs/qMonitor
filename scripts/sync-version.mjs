@@ -4,7 +4,7 @@
  *   node scripts/sync-version.mjs           # read version from package.json
  *   node scripts/sync-version.mjs 1.2.3     # set package.json too, then sync
  *
- * Filenames always use the full semver (e.g. 0.0.1-canary.e5b0094).
+ * Filenames always use the full semver (e.g. 0.0.1-canary.42).
  * WiX/MSI ProductVersion cannot encode a non-numeric prerelease, so canary
  * sets bundle.windows.wix.version to the core tag (0.0.1).
  */

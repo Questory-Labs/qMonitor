@@ -730,7 +730,7 @@ function App() {
             className="chip"
             title={
               sync?.lastTickAt
-                ? `Local session database · last poll ${sync.lastTickAt}${sync.loopAlive === false ? " · loop stuck" : ""}`
+                ? `Local session database · last poll ${new Date(sync.lastTickAt).toLocaleString()}${sync.loopAlive === false ? " · loop stuck" : ""}`
                 : "Local session database"
             }
           >

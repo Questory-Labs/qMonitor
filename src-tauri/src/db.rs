@@ -60,6 +60,7 @@ pub struct TursoDb {
     /// Held so the connection is not dropped with the builder handle.
     _db: Database,
     conn: Connection,
+    path: std::path::PathBuf,
 }
 
 impl TursoDb {
@@ -74,9 +75,13 @@ impl TursoDb {
             .await
             .map_err(|e| format!("turso open: {e}"))?;
         let conn = db.connect().map_err(|e| format!("turso conn: {e}"))?;
-        let this = Self { _db: db, conn };
+        let this = Self { _db: db, conn, path: path.clone() };
         this.migrate().await?;
         Ok(this)
+    }
+
+    pub fn db_path(&self) -> &Path {
+        &self.path
     }
 
     async fn migrate(&self) -> Result<(), String> {

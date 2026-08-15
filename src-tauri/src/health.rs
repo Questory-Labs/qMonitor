@@ -138,6 +138,7 @@ pub fn prune_log_dir(dir: &Path, keep_days: u64, max_bytes: u64) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
+    let active_name = format!("qmonitor.log.{}", Utc::now().format("%Y-%m-%d"));
     let mut files: Vec<(PathBuf, SystemTime, u64)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
@@ -170,7 +171,10 @@ pub fn prune_log_dir(dir: &Path, keep_days: u64, max_bytes: u64) {
         .unwrap_or(SystemTime::UNIX_EPOCH);
     files.retain(|(path, modified, _)| {
         if *modified < cutoff {
-            let _ = fs::remove_file(path);
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name != active_name {
+                let _ = fs::remove_file(path);
+            }
             false
         } else {
             true
@@ -183,7 +187,8 @@ pub fn prune_log_dir(dir: &Path, keep_days: u64, max_bytes: u64) {
         if total <= max_bytes {
             break;
         }
-        if fs::remove_file(&path).is_ok() {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name != active_name && fs::remove_file(&path).is_ok() {
             total = total.saturating_sub(len);
         }
     }
@@ -201,6 +206,9 @@ fn file_nonblocking() -> Option<NonBlocking> {
     }
     let mut g = FILE_SINK.lock().unwrap_or_else(|e| e.into_inner());
     if g.is_none() {
+        if !FILE_ON.load(Ordering::Relaxed) {
+            return None;
+        }
         let dir = log_dir();
         let _ = fs::create_dir_all(&dir);
         let appender = tracing_appender::rolling::daily(&dir, "qmonitor.log");
@@ -313,5 +321,22 @@ mod tests {
         }
         prune_log_dir(dir.path(), 3, LOG_MAX_BYTES);
         assert!(!old.exists(), "age-pruned");
+    }
+
+    #[test]
+    fn prune_preserves_active_daily_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let active_name = format!("qmonitor.log.{}", today);
+        let active = dir.path().join(&active_name);
+        let old_log = dir.path().join("qmonitor.log.2020-01-01");
+
+        fs::write(&active, vec![b'a'; (LOG_MAX_BYTES + 1000) as usize]).unwrap();
+        fs::write(&old_log, vec![b'x'; 100]).unwrap();
+
+        prune_log_dir(dir.path(), 3, LOG_MAX_BYTES);
+
+        assert!(active.exists(), "active file preserved despite size limit");
+        assert!(!old_log.exists(), "old log pruned for size");
     }
 }

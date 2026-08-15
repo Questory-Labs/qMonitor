@@ -290,8 +290,16 @@ async fn apply_sample(
         let mut live = state.live.write().await;
         std::mem::take(&mut live.pending_ends)
     };
-    for end in pending {
-        timed(write_pending_end(db, &end)).await?;
+    let mut processed = 0;
+    for (idx, end) in pending.iter().enumerate() {
+        match timed(write_pending_end(db, end)).await {
+            Ok(()) => processed = idx + 1,
+            Err(e) => {
+                let mut live = state.live.write().await;
+                live.pending_ends.extend_from_slice(&pending[idx..]);
+                return Err(e);
+            }
+        }
     }
 
     let snapshot = state.live.read().await.clone();
@@ -451,11 +459,16 @@ async fn handle_cmd(
             load_prefs(db, state).await.ok();
         }
         PersistCmd::EnsureOpen { reply } => {
+            let resolved_path = state.config.read().await.resolved_db_path();
+            let current_path = db.db_path();
+            if current_path != resolved_path {
+                let _ = reply.send(Err("db path changed; reconnecting".to_string()));
+                return Err(PersistError::Poison("db path changed".to_string()));
+            }
             let ping = timed(db.ping()).await;
-            let path = state.config.read().await.resolved_db_path();
             match ping {
                 Ok(()) => {
-                    let _ = reply.send(Ok(path.display().to_string()));
+                    let _ = reply.send(Ok(resolved_path.display().to_string()));
                 }
                 Err(PersistError::Poison(e)) => {
                     let _ = reply.send(Err(e.clone()));

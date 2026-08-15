@@ -12,7 +12,11 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-22.04]
+        include:
+          - os: windows-latest
+            platform: windows
+          - os: ubuntu-22.04
+            platform: linux
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -31,10 +35,9 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust
         with:
-          workspaces: src-tauri
+          platform: ${{ matrix.platform }}
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Cargo test

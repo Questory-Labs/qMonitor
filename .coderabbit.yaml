@@ -1,0 +1,255 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# qMonitor review policy. Matches GitHub Actions:
+#   main    → canary prerelease  v{package.json}-canary.{run_number}
+#   release → stable GitHub Release v{package.json} (immutable)
+#   PRs     → CI only (no artifacts); targets main | master | release
+#
+language: en-US
+tone_instructions: >-
+  You are reviewing a Tauri 2 desktop app (React UI + Rust core) that watches
+  game processes and pushes completed sessions to Questory. Be concise. Prefer
+  merge-blocking bugs, security, data loss, and release-channel mistakes over
+  style nits. Do not suggest copying a sibling domain or inventing a second
+  version source besides package.json.
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_in_walkthrough: true
+  poem: false
+  collapse_walkthrough: true
+  sequence_diagrams: true
+  review_status: true
+  review_details: true
+  review_progress: true
+  abort_on_close: true
+  auto_apply_labels: false
+  auto_assign_reviewers: false
+
+  labeling_instructions:
+    - label: rust
+      instructions: Changes under src-tauri/ (Rust core, Tauri commands, Cargo).
+    - label: ui
+      instructions: Changes under src/ (React / Vite frontend).
+    - label: ci
+      instructions: Changes under .github/ or scripts/ that affect CI, canary, or release.
+    - label: packaging
+      instructions: Installer, bundle, or distro packaging (packaging/, tauri.conf.json bundle targets).
+    - label: release
+      instructions: Version bumps, GitHub Release/canary workflow, or update-channel logic.
+    - label: security
+      instructions: Auth, OAuth/PKCE, keyring, tokens, webhooks, or process-identity trust.
+
+  path_filters:
+    - "!pnpm-lock.yaml"
+    - "!**/Cargo.lock"
+    - "!src-tauri/target/**"
+    - "!src-tauri/gen/**"
+    - "!dist/**"
+    - "!icons/**"
+    - "!public/favicon.svg"
+    - "!**/*.png"
+    - "!**/*.ico"
+    - "!**/*.icns"
+
+  path_instructions:
+    - path: ".github/workflows/**"
+      instructions: |
+        Branch and publish model (do not invent new channels):
+        - Push to `main` runs canary.yml: immutable prerelease tag
+          `v{package.json.version}-canary.{GITHUB_RUN_NUMBER}`, prerelease=true,
+          make_latest=false. Never reuse or delete unique v*-canary.* tags.
+          The old rolling `canary` tag cleanup is one-shot leftover removal only.
+        - Push to `release` runs release.yml: immutable stable tag `v{package.json.version}`.
+          package.json is the sole version source. If that tag already exists, fail —
+          never mutate a shipped release. Cargo.toml / tauri.conf.json are synced at
+          build via scripts/sync-version.mjs, not edited by hand as source of truth.
+        - PRs targeting main, master, or release run ci.yml (frontend build + cargo test)
+          only. They must not publish GitHub Releases or upload installer artifacts.
+        - build-artifacts.yml is reusable: optional version override for canary;
+          Windows NSIS+MSI, Linux AppImage+.deb, then Arch .pkg.tar.zst from the .deb.
+        Flag secrets in logs, unpinned privileged actions, and concurrency that could
+        cancel an in-flight stable release (release concurrency cancel-in-progress is false).
+
+    - path: "src-tauri/src/{auth,pkce,oauth_loopback,device}.rs"
+      instructions: |
+        Security-sensitive: device login (auth code + PKCE), loopback redirect, OS keyring.
+        Tokens (access_token, session_token/refresh) must never be logged, written to
+        config JSON, or returned to the UI except as booleans (has_access_token).
+        Preserve PKCE verifier/state binding, device_id from hashed install salt, and
+        401 → refresh with device_id + refresh token then retry. Flag SSRF, open
+        redirects, and storing secrets outside the keyring.
+
+    - path: "src-tauri/src/{push,persist,db,session,live_session}.rs"
+      instructions: |
+        Outbox path: completed sessions → local Turso → POST {apiRoot}/webhooks/qmonitor
+        with Bearer access token. HTTP 2xx acks the row; 401 refreshes; other failures
+        retry. Do not drop unacked rows. Retention purge is 7 or 30 days for acked rows
+        only. Payload schema_version, session_id, steam_app_id, timestamps, duration
+        must stay compatible with Questory. Flag double-push, lost ack, and clock/duration
+        inconsistencies.
+
+    - path: "src-tauri/src/{identity,detect}/**/*.rs"
+      instructions: |
+        Steam-first identity: AppID via launch reaper + local library, then Discord
+        detectable catalog, then local catalog + user confirm. Deny-list (identity/deny.rs)
+        must never treat launchers, overlays, browsers, or crash handlers as games.
+        Flag false-positive game detection, ignoring is_denied, and path/exe fingerprint
+        collisions that could mix two titles.
+
+    - path: "src-tauri/src/{update_check,config}.rs"
+      instructions: |
+        Updates are notify-only (link to GitHub Releases), never auto-install.
+        Stable channel uses GitHub "latest" and must ignore prerelease / *-canary.* tags.
+        Canary channel picks the newest prerelease whose tag matches vX.Y.Z-canary.N
+        (not a rolling `canary` tag). open_release_url must stay allowlisted to
+        github.com/Questory-Labs/qMonitor/releases. Default update_channel is stable.
+        Config lives under the OS config dir (qMonitor); do not write tokens there.
+
+    - path: "src-tauri/**/*.rs"
+      instructions: |
+        Tauri 2 + Tokio. Prefer existing modules over new crates. Tauri commands stay
+        thin; keep process polling, identity, and DB off the UI thread. Tests are
+        #[cfg(test)] in the same module (cargo test in src-tauri) — new logic needs
+        coverage for success, error, and platform #cfg paths. Do not suggest unwrap
+        on fallible I/O in production paths.
+
+    - path: "src/**/*.{ts,tsx,css}"
+      instructions: |
+        Compact tray-friendly UI (Home / Games / Settings). Invoke Tauri commands
+        through the existing helpers (including invokeTimeout). Do not call Questory
+        HTTP from the renderer — auth and webhook live in Rust. UpdateSettings channel
+        is "stable" | "canary" only. Avoid leaking tokens into React state beyond
+        AuthState booleans.
+
+    - path: "{package.json,src-tauri/tauri.conf.json,src-tauri/Cargo.toml,scripts/sync-version.mjs}"
+      instructions: |
+        package.json.version is the only version source. sync-version.mjs copies it to
+        Cargo.toml and tauri.conf.json at build; canary semver needs wix.version set to
+        the core X.Y.Z because MSI ProductVersion cannot encode -canary.N. Do not
+        introduce a second version field or bump Cargo/tauri independently.
+
+    - path: "packaging/**"
+      instructions: |
+        Arch package is a CI repack of the official .deb (PKGBUILD source rewritten
+        in build-artifacts.yml). Keep runtime depends (GTK/WebKit) accurate. Do not
+        assume an AUR source URL unless the PR is explicitly adding one.
+
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 5
+    # Default branch (main) is always reviewed. Also cover stable + legacy CI targets.
+    base_branches:
+      - "^release$"
+      - "^master$"
+    ignore_title_keywords:
+      - WIP
+      - "[skip review]"
+      - "[skip cr]"
+    labels:
+      - "!do-not-review"
+    ignore_usernames:
+      - dependabot[bot]
+      - renovate[bot]
+      - github-actions[bot]
+
+  pre_merge_checks:
+    docstrings:
+      mode: off
+    title:
+      mode: warning
+      requirements: >-
+        Concise imperative summary of the change (e.g. "Fix Steam reaper AppID
+        resolution"). Do not put version tags or "canary"/"release" in the title
+        unless the PR actually changes publish/update-channel behavior.
+    description:
+      mode: warning
+    issue_assessment:
+      mode: off
+    custom_checks:
+      - name: Release vs canary versioning
+        mode: warning
+        instructions: >-
+          Fail if a PR targeting `release` sets package.json version to a
+          prerelease (contains -canary or other -prerelease) or reuses an
+          existing v* GitHub Release tag. Fail if workflows publish artifacts
+          from pull_request events, retag a shipped vX.Y.Z, or treat a rolling
+          `canary` tag as the canary channel (channel is unique
+          v{version}-canary.{run_number} prereleases). Pass when versioning is
+          unchanged or correctly follows package.json as the sole source.
+
+  tools:
+    clippy:
+      enabled: true
+    actionlint:
+      enabled: true
+    zizmor:
+      enabled: true
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+    github-checks:
+      enabled: true
+    shellcheck:
+      enabled: true
+    yamllint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    oxc:
+      enabled: true
+    osv-scanner:
+      enabled: true
+
+chat:
+  auto_reply: true
+  art: false
+
+knowledge_base:
+  opt_out: false
+  web_search:
+    enabled: true
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - files: README.md
+        applyTo: "**/*"
+  learnings:
+    scope: local
+  issues:
+    scope: local
+  pull_requests:
+    scope: local
+  linked_repositories:
+    - repository: Questory-Labs/Questory
+      instructions: >-
+        Questory API/web that qMonitor authenticates against and pushes to.
+        Device OAuth lives at /oauth/qmonitor/{authorize,token,revoke}.
+        Session ingest is POST /webhooks/qmonitor (proxied as /api/webhooks/qmonitor
+        from the web origin). Flag payload or auth contract drift against that repo.
+
+code_generation:
+  docstrings:
+    language: en-US
+    path_instructions:
+      - path: "src-tauri/**/*.rs"
+        instructions: >-
+          Use rustdoc on exported types and Tauri commands. Document invariants,
+          error cases, and why — not what the code already says. Skip trivial
+          private helpers.
+  unit_tests:
+    path_instructions:
+      - path: "src-tauri/**/*.rs"
+        instructions: >-
+          Add #[cfg(test)] tests in the same module. Cover identity resolution,
+          deny-list, outbox ack/retry, update-channel tag parsing, and auth token
+          handling without hitting the network (mock HTTP / temp dirs).
+      - path: "src/**/*.{ts,tsx}"
+        instructions: >-
+          Only add frontend tests if the repo already has a runner for them.
+          Prefer covering logic in Rust when the behavior is enforced there.

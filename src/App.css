@@ -858,11 +858,36 @@ code {
 }
 
 .settings-advanced[open] summary {
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.15rem;
 }
 
-.settings-advanced .field:first-of-type {
-  margin-top: 0.5rem;
+.advanced-group {
+  margin-top: 0.7rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--line);
+}
+
+.advanced-group:first-of-type {
+  margin-top: 0.25rem;
+  padding-top: 0;
+  border-top: none;
+}
+
+.advanced-group-label {
+  margin: 0 0 0.45rem;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--faint);
+}
+
+.advanced-group .field {
+  margin-top: 0.65rem;
+}
+
+.advanced-group .field:first-of-type {
+  margin-top: 0;
 }
 
 .settings-save {
@@ -992,6 +1017,21 @@ code {
 
 .dialog .field {
   margin-top: 0.85rem;
+}
+
+.path-row {
+  display: flex;
+  gap: 0.45rem;
+  align-items: stretch;
+}
+
+.path-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.path-row .btn {
+  flex-shrink: 0;
 }
 
 .dialog-actions {

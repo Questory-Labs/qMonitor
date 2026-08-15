@@ -3,10 +3,14 @@ mod config;
 mod db;
 mod detect;
 mod device;
+mod health;
 mod identity;
+mod live_session;
 mod oauth_loopback;
+mod persist;
 mod pkce;
 mod push;
+mod runtime;
 mod session;
 mod update_check;
 
@@ -60,6 +64,7 @@ async fn save_config(
     let channel_changed = prev_channel != config.update_channel;
     let next_channel = config.update_channel;
     config.save()?;
+    crate::health::apply_log_level(config.log_level);
     *state.config.write().await = config.clone();
     state.reload_pipeline().await;
     if url_changed {
@@ -239,9 +244,23 @@ async fn add_manual_game(
 
 #[tauri::command]
 async fn open_db(state: State<'_, Arc<AppState>>) -> Result<String, String> {
-    state.connect_db().await?;
     let path = state.config.read().await.resolved_db_path();
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| "invalid database path".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    // Open the folder, not the .db file — there is usually no default app.
+    open::that(dir).map_err(|e| e.to_string())?;
     Ok(path.display().to_string())
+}
+
+#[tauri::command]
+fn open_log_dir() -> Result<String, String> {
+    let dir = crate::health::log_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    open::that(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.display().to_string())
 }
 
 #[tauri::command]
@@ -295,9 +314,7 @@ fn emit_update_event(app: &tauri::AppHandle, pending: Option<&PendingUpdate>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter("qmonitor=info,warn")
-        .init();
+    crate::health::init_tracing();
 
     let app_state = Arc::new(AppState::new());
     let login_listener = LoginListener(Arc::new(Mutex::new(None)));
@@ -306,6 +323,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
@@ -350,20 +368,7 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = state.connect_db().await {
-                    tracing::error!(%e, "initial local database connect failed; will retry on tick/home");
-                }
-                loop {
-                    let interval = {
-                        let cfg = state.config.read().await;
-                        cfg.poll_interval_secs.max(1)
-                    };
-                    state.tick().await;
-                    let _ = handle.emit("qmonitor://tick", ());
-                    tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
-                }
-            });
+            crate::runtime::spawn_workers(handle.clone(), state.clone(), _tray);
 
             let detectable_state = app_state.clone();
             tauri::async_runtime::spawn(async move {
@@ -440,6 +445,7 @@ pub fn run() {
             unignore_game,
             add_manual_game,
             open_db,
+            open_log_dir,
             is_onboarded,
             login_listening,
             get_app_version,

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
 import { QMark } from "./components/QMark";
 import {
@@ -34,6 +35,10 @@ interface SyncStatus {
   lastError?: string;
   activeTitle?: string;
   webhookConfigured: boolean;
+  lastTickAt?: string;
+  loopAlive?: boolean;
+  dbReconnects?: number;
+  detectTimeouts?: number;
 }
 
 interface PendingDetection {
@@ -57,6 +62,15 @@ interface TrackableGame {
   steamAppId?: number;
   source: string;
   trackingEnabled: boolean;
+}
+
+function invokeTimeout<T>(cmd: string, ms = 4000): Promise<T> {
+  return Promise.race([
+    invoke<T>(cmd),
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`${cmd} timed out`)), ms),
+    ),
+  ]);
 }
 
 function BrandMark({ size = "sm" }: { size?: "sm" | "md" }) {
@@ -149,10 +163,10 @@ function App() {
   const refresh = useCallback(async () => {
     try {
       const [h, a, o, g] = await Promise.all([
-        invoke<HomeState>("get_home"),
-        invoke<AuthState | null>("get_auth_state"),
-        invoke<boolean>("is_onboarded"),
-        invoke<TrackableGame[]>("list_games"),
+        invokeTimeout<HomeState>("get_home"),
+        invokeTimeout<AuthState | null>("get_auth_state"),
+        invokeTimeout<boolean>("is_onboarded"),
+        invokeTimeout<TrackableGame[]>("list_games"),
       ]);
       setHome(h);
       setAuth(a);
@@ -175,9 +189,11 @@ function App() {
     void loadConfig();
     void refresh();
     const unsubs: Array<() => void> = [];
-    listen("qmonitor://tick", () => {
-      refresh();
-    }).then((fn) => unsubs.push(fn));
+    const onTick = () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void refresh();
+    };
+    listen("qmonitor://tick", onTick).then((fn) => unsubs.push(fn));
     listen("qmonitor://auth-success", async () => {
       setLoginPhase("idle");
       setShowManualAuth(false);
@@ -188,9 +204,16 @@ function App() {
     listen("qmonitor://auth-waiting", () => {
       setLoginPhase("waiting");
     }).then((fn) => unsubs.push(fn));
-    const id = setInterval(refresh, 5000);
+    const onVis = () => {
+      if (!document.hidden) void refresh();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    const id = setInterval(() => {
+      if (!document.hidden) void refresh();
+    }, 5000);
     return () => {
       clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
       unsubs.forEach((u) => u());
     };
   }, [refresh, loadConfig, showToast]);
@@ -290,6 +313,30 @@ function App() {
     setAddExe("");
     setAddSteamId("");
     setAddOpen(true);
+  }
+
+  function titleFromExePath(path: string): string {
+    const base = path.replace(/[/\\]+$/, "").split(/[/\\]/).pop() ?? "";
+    return base.replace(/\.exe$/i, "").trim();
+  }
+
+  async function browseExe() {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        title: "Choose game executable",
+        filters: [
+          { name: "Executables", extensions: ["exe"] },
+          { name: "All files", extensions: ["*"] },
+        ],
+      });
+      if (typeof selected !== "string" || !selected) return;
+      setAddExe(selected);
+      setAddTitle((current) => current.trim() || titleFromExePath(selected));
+    } catch (e) {
+      showToast(String(e), true);
+    }
   }
 
   async function submitAddGame() {
@@ -679,7 +726,14 @@ function App() {
 
       <footer className="bottombar">
         <div className="sync-chips">
-          <span className="chip" title="Local session database">
+          <span
+            className="chip"
+            title={
+              sync?.lastTickAt
+                ? `Local session database · last poll ${sync.lastTickAt}${sync.loopAlive === false ? " · loop stuck" : ""}`
+                : "Local session database"
+            }
+          >
             <span className={`dot ${sync?.tursoOk ? "on" : ""}`} />
             {sync?.tursoOk ? "DB" : "DB off"}
           </span>
@@ -731,14 +785,25 @@ function App() {
                 autoFocus
               />
             </label>
-            <label className="field">
+            <div className="field">
               <span>Exe or full path</span>
-              <input
-                value={addExe}
-                onChange={(e) => setAddExe(e.target.value)}
-                placeholder="D:\Games\Hades\Hades.exe"
-              />
-            </label>
+              <div className="path-row">
+                <input
+                  value={addExe}
+                  onChange={(e) => setAddExe(e.target.value)}
+                  placeholder="D:\Games\Hades\Hades.exe"
+                  aria-label="Exe or full path"
+                />
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => void browseExe()}
+                  disabled={adding}
+                >
+                  Browse
+                </button>
+              </div>
+            </div>
             <label className="field">
               <span>Steam App ID (optional)</span>
               <input

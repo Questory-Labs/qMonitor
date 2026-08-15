@@ -1,16 +1,16 @@
 //! Persist worker: exclusive owner of the Turso connection.
 
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
 
 use crate::db::{SessionRow, TursoDb};
-use crate::identity::ManualGame;
+use crate::identity::{GameIdentity, ManualGame};
 use crate::live_session::{DetectSample, PendingEnd, SLEEP_SPLIT};
 #[cfg(test)]
 use crate::live_session::LiveSession;
@@ -23,6 +23,7 @@ pub const RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
 #[derive(Debug)]
 pub enum PersistError {
     Poison(String),
+    PathChanged,
 }
 
 pub enum PersistCmd {
@@ -66,6 +67,14 @@ pub async fn timed<T>(fut: impl Future<Output = Result<T, String>>) -> Result<T,
     }
 }
 
+fn persist_reply(res: &Result<(), PersistError>) -> Result<(), String> {
+    match res {
+        Ok(()) => Ok(()),
+        Err(PersistError::Poison(e)) => Err(e.clone()),
+        Err(PersistError::PathChanged) => Err("db path changed".into()),
+    }
+}
+
 /// Flush pending ends + current tracking onto the DB. DB start wins when a row exists.
 #[cfg(test)]
 pub async fn flush_live(db: &TursoDb, live: &mut LiveSession) -> Result<(), String> {
@@ -73,40 +82,17 @@ pub async fn flush_live(db: &TursoDb, live: &mut LiveSession) -> Result<(), Stri
     for end in pending {
         write_pending_end(db, &end).await?;
     }
-
-    if let Some(identity) = live.identity.clone() {
-        let started = live.started_at.unwrap_or_else(Utc::now);
-        let row = db.open_session_at(&identity, started).await?;
-        live.db_session_id = Some(row.id.clone());
-        live.started_at = Some(row.started_at);
-
-        let actives = db.list_active().await?;
-        let last_seen = live.last_seen_at.unwrap_or(row.started_at);
-        for other in actives.iter().filter(|s| s.identity_id != identity.id) {
-            db.end_session_at(&other.id, last_seen).await?;
-        }
-
-        let mut same: Vec<_> = db
-            .list_active()
-            .await?
-            .into_iter()
-            .filter(|s| s.identity_id == identity.id)
-            .collect();
-        same.sort_by_key(|s| s.started_at);
-        if same.len() > 1 {
-            let discard: Vec<String> = same.iter().skip(1).map(|s| s.id.clone()).collect();
-            db.discard_active_sessions(&discard).await?;
-        }
-        if let Some(keep) = same.first() {
-            live.db_session_id = Some(keep.id.clone());
-            live.started_at = Some(keep.started_at);
-        }
-    } else if live.last_tick_at.is_some() {
-        for row in db.list_active().await? {
-            let cap = row.started_at + SLEEP_SPLIT;
-            let ended = Utc::now().min(cap);
-            db.end_session_at(&row.id, ended).await?;
-        }
+    if let Some((id, started)) = reconcile_live(
+        db,
+        live.identity.as_ref(),
+        live.started_at,
+        live.last_seen_at,
+        live.last_tick_at,
+    )
+    .await?
+    {
+        live.db_session_id = Some(id);
+        live.started_at = Some(started);
     }
     Ok(())
 }
@@ -133,6 +119,55 @@ async fn write_pending_end(db: &TursoDb, end: &PendingEnd) -> Result<(), String>
         db.end_session_at(&opened.id, end.ended_at).await?;
     }
     Ok(())
+}
+
+/// Open-or-reuse the tracked identity, end other actives, discard duplicate actives,
+/// and cap orphan endings at `SLEEP_SPLIT`.
+async fn reconcile_live(
+    db: &TursoDb,
+    identity: Option<&GameIdentity>,
+    started_at: Option<DateTime<Utc>>,
+    last_seen_at: Option<DateTime<Utc>>,
+    last_tick_at: Option<DateTime<Utc>>,
+) -> Result<Option<(String, DateTime<Utc>)>, String> {
+    if let Some(identity) = identity {
+        let started = started_at.unwrap_or_else(Utc::now);
+        let row = db.open_session_at(identity, started).await?;
+        let mut keep_id = row.id.clone();
+        let mut keep_started = row.started_at;
+
+        let actives = db.list_active().await?;
+        let last_seen = last_seen_at.unwrap_or(row.started_at);
+        for other in actives.iter().filter(|s| s.identity_id != identity.id) {
+            db.end_session_at(&other.id, last_seen).await?;
+        }
+
+        let mut same: Vec<_> = db
+            .list_active()
+            .await?
+            .into_iter()
+            .filter(|s| s.identity_id == identity.id)
+            .collect();
+        same.sort_by_key(|s| s.started_at);
+        if same.len() > 1 {
+            let discard: Vec<String> = same.iter().skip(1).map(|s| s.id.clone()).collect();
+            db.discard_active_sessions(&discard).await?;
+        }
+        if let Some(keep) = same.first() {
+            keep_id = keep.id.clone();
+            keep_started = keep.started_at;
+        }
+        Ok(Some((keep_id, keep_started)))
+    } else if last_tick_at.is_some() {
+        for row in db.list_active().await? {
+            let cap = row.started_at + SLEEP_SPLIT;
+            let ended = Utc::now().min(cap);
+            db.end_session_at(&row.id, ended).await?;
+        }
+        Ok(None)
+    } else {
+        Ok(None)
+    }
 }
 
 async fn refresh_view(db: &TursoDb) -> Result<DbView, String> {
@@ -197,6 +232,7 @@ pub async fn run_persist(
                 match persist_loop(
                     &state,
                     &db,
+                    &path,
                     &mut sample_rx,
                     &mut cmd_rx,
                     &push_tx,
@@ -205,6 +241,9 @@ pub async fn run_persist(
                 .await
                 {
                     Ok(()) => return,
+                    Err(PersistError::PathChanged) => {
+                        tracing::info!(gen = generation, "db path changed; reopening");
+                    }
                     Err(PersistError::Poison(e)) => {
                         tracing::warn!(%e, gen = generation, "persist poisoned; dropping connection");
                         *state.last_error.write().await = Some(e.clone());
@@ -236,6 +275,7 @@ async fn open_db(path: &PathBuf) -> Result<TursoDb, String> {
 async fn persist_loop(
     state: &AppState,
     db: &TursoDb,
+    opened_path: &Path,
     sample_rx: &mut watch::Receiver<DetectSample>,
     cmd_rx: &mut mpsc::Receiver<PersistCmd>,
     push_tx: &mpsc::Sender<SessionRow>,
@@ -252,7 +292,7 @@ async fn persist_loop(
                 apply_sample(state, db, push_tx).await?;
             }
             Some(cmd) = cmd_rx.recv() => {
-                handle_cmd(state, db, cmd).await?;
+                handle_cmd(state, db, opened_path, cmd).await?;
             }
             Some((id, result)) = push_result_rx.recv() => {
                 match result {
@@ -290,48 +330,31 @@ async fn apply_sample(
         let mut live = state.live.write().await;
         std::mem::take(&mut live.pending_ends)
     };
-    for end in pending {
-        timed(write_pending_end(db, &end)).await?;
+    let mut pending = pending.into_iter();
+    while let Some(end) = pending.next() {
+        if let Err(e) = timed(write_pending_end(db, &end)).await {
+            let mut live = state.live.write().await;
+            let mut rest: Vec<_> = std::iter::once(end).chain(pending).collect();
+            rest.append(&mut live.pending_ends);
+            live.pending_ends = rest;
+            return Err(e);
+        }
     }
 
     let snapshot = state.live.read().await.clone();
-    if let Some(identity) = snapshot.identity.clone() {
-        let started = snapshot.started_at.unwrap_or_else(Utc::now);
-        let row = timed(db.open_session_at(&identity, started)).await?;
-        {
-            let mut live = state.live.write().await;
-            if live.identity_id() == Some(identity.id.as_str()) {
-                live.db_session_id = Some(row.id.clone());
-                live.started_at = Some(row.started_at);
-            }
-        }
-        let actives = timed(db.list_active()).await?;
-        let last_seen = snapshot.last_seen_at.unwrap_or(row.started_at);
-        for other in actives.iter().filter(|s| s.identity_id != identity.id) {
-            timed(db.end_session_at(&other.id, last_seen)).await?;
-        }
-        let mut same: Vec<_> = timed(db.list_active())
-            .await?
-            .into_iter()
-            .filter(|s| s.identity_id == identity.id)
-            .collect();
-        same.sort_by_key(|s| s.started_at);
-        if same.len() > 1 {
-            let discard: Vec<String> = same.iter().skip(1).map(|s| s.id.clone()).collect();
-            timed(db.discard_active_sessions(&discard)).await?;
-        }
-        if let Some(keep) = same.first() {
-            let mut live = state.live.write().await;
-            if live.identity_id() == Some(identity.id.as_str()) {
-                live.db_session_id = Some(keep.id.clone());
-                live.started_at = Some(keep.started_at);
-            }
-        }
-    } else if snapshot.last_tick_at.is_some() {
-        for row in timed(db.list_active()).await? {
-            let cap = row.started_at + SLEEP_SPLIT;
-            let ended = Utc::now().min(cap);
-            timed(db.end_session_at(&row.id, ended)).await?;
+    let keep = timed(reconcile_live(
+        db,
+        snapshot.identity.as_ref(),
+        snapshot.started_at,
+        snapshot.last_seen_at,
+        snapshot.last_tick_at,
+    ))
+    .await?;
+    if let (Some(identity), Some((id, started))) = (snapshot.identity.as_ref(), keep) {
+        let mut live = state.live.write().await;
+        if live.identity_id() == Some(identity.id.as_str()) {
+            live.db_session_id = Some(id);
+            live.started_at = Some(started);
         }
     }
 
@@ -360,6 +383,7 @@ async fn refresh_and_store(state: &AppState, db: &TursoDb) -> Result<(), Persist
 async fn handle_cmd(
     state: &AppState,
     db: &TursoDb,
+    opened_path: &Path,
     cmd: PersistCmd,
 ) -> Result<(), PersistError> {
     match cmd {
@@ -376,10 +400,7 @@ async fn handle_cmd(
                 Ok(())
             })
             .await;
-            let out = match &res {
-                Ok(()) => Ok(()),
-                Err(PersistError::Poison(e)) => Err(e.clone()),
-            };
+            let out = persist_reply(&res);
             let _ = reply.send(out);
             res?;
             load_prefs(db, state).await.ok();
@@ -404,10 +425,7 @@ async fn handle_cmd(
                 Ok(())
             })
             .await;
-            let out = match &res {
-                Ok(()) => Ok(()),
-                Err(PersistError::Poison(e)) => Err(e.clone()),
-            };
+            let out = persist_reply(&res);
             let _ = reply.send(out);
             res?;
             {
@@ -423,10 +441,7 @@ async fn handle_cmd(
             reply,
         } => {
             let res = timed(db.remove_ignored(&identity_id)).await;
-            let out = match &res {
-                Ok(()) => Ok(()),
-                Err(PersistError::Poison(e)) => Err(e.clone()),
-            };
+            let out = persist_reply(&res);
             let _ = reply.send(out);
             res?;
             load_prefs(db, state).await.ok();
@@ -442,25 +457,26 @@ async fn handle_cmd(
                 Ok(())
             })
             .await;
-            let out = match &res {
-                Ok(()) => Ok(()),
-                Err(PersistError::Poison(e)) => Err(e.clone()),
-            };
+            let out = persist_reply(&res);
             let _ = reply.send(out);
             res?;
             load_prefs(db, state).await.ok();
         }
         PersistCmd::EnsureOpen { reply } => {
-            let ping = timed(db.ping()).await;
-            let path = state.config.read().await.resolved_db_path();
-            match ping {
+            let configured = state.config.read().await.resolved_db_path();
+            if configured.as_path() != opened_path {
+                let _ = reply.send(Ok(configured.display().to_string()));
+                return Err(PersistError::PathChanged);
+            }
+            match timed(db.ping()).await {
                 Ok(()) => {
-                    let _ = reply.send(Ok(path.display().to_string()));
+                    let _ = reply.send(Ok(configured.display().to_string()));
                 }
                 Err(PersistError::Poison(e)) => {
                     let _ = reply.send(Err(e.clone()));
                     return Err(PersistError::Poison(e));
                 }
+                Err(PersistError::PathChanged) => return Err(PersistError::PathChanged),
             }
         }
     }
@@ -497,6 +513,7 @@ mod tests {
         .unwrap_err();
         match err {
             PersistError::Poison(msg) => assert!(msg.contains("timeout"), "{msg}"),
+            PersistError::PathChanged => panic!("expected timeout poison"),
         }
     }
 

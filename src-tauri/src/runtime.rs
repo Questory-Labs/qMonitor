@@ -6,6 +6,7 @@ use std::time::Duration;
 use chrono::Utc;
 use tauri::Emitter;
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 
 use crate::auth;
 use crate::db::SessionRow;
@@ -56,25 +57,32 @@ pub fn spawn_workers(app: tauri::AppHandle, state: Arc<AppState>, tray: tauri::t
 async fn run_detect(state: Arc<AppState>, sample_tx: watch::Sender<DetectSample>) {
     let mut prev_processes: Vec<ProcessSnapshot> = Vec::new();
     let mut prev_fg: Option<u32> = None;
+    let mut in_flight: Option<JoinHandle<(Vec<ProcessSnapshot>, Option<u32>)>> = None;
     loop {
         let interval = state.config.read().await.poll_interval_secs.max(1);
-        let snap = tokio::time::timeout(
-            DETECT_BLOCKING_TIMEOUT,
-            tokio::task::spawn_blocking(|| {
+        if in_flight.is_none() {
+            in_flight = Some(tokio::task::spawn_blocking(|| {
                 let processes = snapshot_processes();
                 let fg = foreground_pid();
                 (processes, fg)
-            }),
+            }));
+        }
+
+        let snap = tokio::time::timeout(
+            DETECT_BLOCKING_TIMEOUT,
+            in_flight.as_mut().expect("in-flight snapshot"),
         )
         .await;
 
         let (processes, fg) = match snap {
             Ok(Ok(pair)) => {
+                in_flight = None;
                 prev_processes = pair.0.clone();
                 prev_fg = pair.1;
                 pair
             }
             Ok(Err(e)) => {
+                in_flight = None;
                 tracing::warn!(%e, "detect join failed");
                 (prev_processes.clone(), prev_fg)
             }
@@ -129,25 +137,21 @@ async fn run_push(
 ) {
     let client = WebhookClient::new();
     loop {
-        tokio::select! {
-            Some(row) = push_rx.recv() => {
-                let cfg = state.config.read().await.clone();
-                let result = match (cfg.webhook_url(), auth::get_access_token(&cfg)) {
-                    (Some(url), Some(token)) => client.push(&cfg, &url, &token, &row).await,
-                    _ => {
-                        tokio::time::sleep(PUSH_POLL).await;
-                        continue;
-                    }
-                };
-                if result.is_ok() {
-                    state.health.write().await.last_push_at = Some(Utc::now());
-                } else if let Err(e) = &result {
-                    *state.last_error.write().await = Some(e.clone());
-                }
-                let _ = result_tx.send((row.id, result)).await;
-            }
-            else => break,
+        let cfg = state.config.read().await.clone();
+        let (Some(url), Some(token)) = (cfg.webhook_url(), auth::get_access_token(&cfg)) else {
+            tokio::time::sleep(PUSH_POLL).await;
+            continue;
+        };
+        let Some(row) = push_rx.recv().await else {
+            break;
+        };
+        let result = client.push(&cfg, &url, &token, &row).await;
+        if result.is_ok() {
+            state.health.write().await.last_push_at = Some(Utc::now());
+        } else if let Err(e) = &result {
+            *state.last_error.write().await = Some(e.clone());
         }
+        let _ = result_tx.send((row.id, result)).await;
     }
 }
 

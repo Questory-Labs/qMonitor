@@ -114,21 +114,22 @@ fn hydrate_keyring_once(cache: &mut TokenCache) {
     }
 }
 
+fn keyring_set(key: &str, value: &str, what: &str) {
+    match Entry::new(KEYRING_SERVICE, key) {
+        Ok(entry) => {
+            if let Err(e) = entry.set_password(value) {
+                tracing::warn!(%e, "{what} write failed; token cached in memory");
+            }
+        }
+        Err(e) => tracing::warn!(%e, "{what} write failed; token cached in memory"),
+    }
+}
+
 pub fn store_tokens(access: &str, refresh: Option<&str>) -> Result<(), String> {
     cache_put(Some(access), refresh);
-    if let Err(e) = Entry::new(KEYRING_SERVICE, KEYRING_ACCESS)
-        .map_err(|e| e.to_string())?
-        .set_password(access)
-    {
-        tracing::warn!(%e, "keyring access write failed; token cached in memory");
-    }
+    keyring_set(KEYRING_ACCESS, access, "keyring access");
     if let Some(s) = refresh {
-        if let Err(e) = Entry::new(KEYRING_SERVICE, KEYRING_SESSION)
-            .map_err(|e| e.to_string())?
-            .set_password(s)
-        {
-            tracing::warn!(%e, "keyring refresh write failed; token cached in memory");
-        }
+        keyring_set(KEYRING_SESSION, s, "keyring refresh");
     }
     Ok(())
 }

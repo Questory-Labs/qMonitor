@@ -1,6 +1,7 @@
 //! App state, pipeline prefs, and UI-facing home snapshot.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -119,6 +120,23 @@ impl AppState {
             .map_err(|_| "persist dropped".to_string())?
     }
 
+    async fn persist_or_db<F, Fut>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<(), String>>) -> PersistCmd,
+        fallback: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), String>>,
+    {
+        if self.persist_tx.lock().ok().and_then(|g| g.clone()).is_some() {
+            drop(fallback);
+            self.call_persist(make).await
+        } else {
+            fallback().await
+        }
+    }
+
     pub async fn reload_pipeline(&self) {
         let cfg = self.config.read().await.clone();
         let steam = cfg.steam_path_override.as_ref().map(PathBuf::from);
@@ -209,18 +227,22 @@ impl AppState {
             pipe.ignored_identities.remove(&identity_id);
             pipe.user_mappings.insert(fingerprint.clone(), mapping);
         }
-        if self.persist_tx.lock().ok().and_then(|g| g.clone()).is_some() {
-            self.call_persist(|reply| PersistCmd::Confirm {
-                fingerprint,
-                title,
+        self.persist_or_db(
+            |reply| PersistCmd::Confirm {
+                fingerprint: fingerprint.clone(),
+                title: title.clone(),
                 reply,
-            })
-            .await?;
-        } else if let Some(db) = self.db.read().await.as_ref() {
-            db.upsert_mapping(&fingerprint, &title, &identity_id)
-                .await?;
-            let _ = db.remove_ignored(&identity_id).await;
-        }
+            },
+            || async {
+                if let Some(db) = self.db.read().await.as_ref() {
+                    db.upsert_mapping(&fingerprint, &title, &identity_id)
+                        .await?;
+                    let _ = db.remove_ignored(&identity_id).await;
+                }
+                Ok(())
+            },
+        )
+        .await?;
         Ok(())
     }
 
@@ -240,25 +262,29 @@ impl AppState {
             .write()
             .await
             .insert(identity_id.clone(), title.clone());
-        if self.persist_tx.lock().ok().and_then(|g| g.clone()).is_some() {
-            self.call_persist(|reply| PersistCmd::Ignore {
-                identity_id,
-                title,
+        self.persist_or_db(
+            |reply| PersistCmd::Ignore {
+                identity_id: identity_id.clone(),
+                title: title.clone(),
                 reply,
-            })
-            .await?;
-        } else if let Some(db) = self.db.read().await.as_ref() {
-            db.upsert_ignored(&identity_id, &title).await?;
-            let actives = db.list_active().await.unwrap_or_default();
-            let discard_ids: Vec<String> = actives
-                .into_iter()
-                .filter(|s| s.identity_id == identity_id)
-                .map(|s| s.id)
-                .collect();
-            if !discard_ids.is_empty() {
-                let _ = db.discard_active_sessions(&discard_ids).await;
-            }
-        }
+            },
+            || async {
+                if let Some(db) = self.db.read().await.as_ref() {
+                    db.upsert_ignored(&identity_id, &title).await?;
+                    let actives = db.list_active().await.unwrap_or_default();
+                    let discard_ids: Vec<String> = actives
+                        .into_iter()
+                        .filter(|s| s.identity_id == identity_id)
+                        .map(|s| s.id)
+                        .collect();
+                    if !discard_ids.is_empty() {
+                        let _ = db.discard_active_sessions(&discard_ids).await;
+                    }
+                }
+                Ok(())
+            },
+        )
+        .await?;
         Ok(())
     }
 
@@ -269,15 +295,19 @@ impl AppState {
             .ignored_identities
             .remove(&identity_id);
         self.ignored_titles.write().await.remove(&identity_id);
-        if self.persist_tx.lock().ok().and_then(|g| g.clone()).is_some() {
-            self.call_persist(|reply| PersistCmd::Unignore {
-                identity_id,
+        self.persist_or_db(
+            |reply| PersistCmd::Unignore {
+                identity_id: identity_id.clone(),
                 reply,
-            })
-            .await?;
-        } else if let Some(db) = self.db.read().await.as_ref() {
-            db.remove_ignored(&identity_id).await?;
-        }
+            },
+            || async {
+                if let Some(db) = self.db.read().await.as_ref() {
+                    db.remove_ignored(&identity_id).await?;
+                }
+                Ok(())
+            },
+        )
+        .await?;
         Ok(())
     }
 
@@ -311,26 +341,29 @@ impl AppState {
             });
             pipe.manual_games.push(game.clone());
         }
-        if self.persist_tx.lock().ok().and_then(|g| g.clone()).is_some() {
-            self.call_persist(|reply| PersistCmd::AddManual {
+        self.persist_or_db(
+            |reply| PersistCmd::AddManual {
                 game: game.clone(),
-                identity_id,
+                identity_id: identity_id.clone(),
                 reply,
-            })
-            .await?;
-        } else if let Some(db) = self.db.read().await.as_ref() {
-            db.upsert_manual_game(&game).await?;
-            let _ = db.remove_ignored(&identity_id).await;
-        }
+            },
+            || async {
+                if let Some(db) = self.db.read().await.as_ref() {
+                    db.upsert_manual_game(&game).await?;
+                    let _ = db.remove_ignored(&identity_id).await;
+                }
+                Ok(())
+            },
+        )
+        .await?;
         Ok(game)
     }
 }
 
 fn overlay_active(live: &LiveSession, db_active: Option<SessionRow>) -> Option<SessionRow> {
-    if !live.is_tracking() {
+    let Some(identity) = live.identity.as_ref() else {
         return db_active;
-    }
-    let identity = live.identity.as_ref().unwrap();
+    };
     if db_active
         .as_ref()
         .is_some_and(|a| a.identity_id == identity.id)

@@ -7,11 +7,9 @@
 #
 language: en-US
 tone_instructions: >-
-  You are reviewing a Tauri 2 desktop app (React UI + Rust core) that watches
-  game processes and pushes completed sessions to Questory. Be concise. Prefer
-  merge-blocking bugs, security, data loss, and release-channel mistakes over
-  style nits. Do not suggest copying a sibling domain or inventing a second
-  version source besides package.json.
+  Concise reviews for this Tauri 2 + React desktop app. Prefer merge-blocking
+  bugs, security, data loss, and release-channel mistakes over style nits. Do
+  not invent a second version source besides package.json.
 
 reviews:
   profile: chill

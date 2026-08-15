@@ -275,10 +275,11 @@ impl TursoDb {
             ended_at
         };
         let duration = (ended - row.started_at).num_seconds().max(0);
+        let next_retry_at = Utc::now();
         row.ended_at = Some(ended);
         row.duration_secs = Some(duration);
         row.push_status = PushStatus::Pending;
-        row.next_retry_at = Some(Utc::now());
+        row.next_retry_at = Some(next_retry_at);
         self.conn
             .execute(
                 r#"UPDATE sessions SET ended_at=?, duration_secs=?, push_status=?, next_retry_at=? WHERE id=?"#,
@@ -286,7 +287,7 @@ impl TursoDb {
                     ended.to_rfc3339(),
                     duration,
                     PushStatus::Pending.as_str(),
-                    Utc::now().to_rfc3339(),
+                    next_retry_at.to_rfc3339(),
                     id,
                 ),
             )

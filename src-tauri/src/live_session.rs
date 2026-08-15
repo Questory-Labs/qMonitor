@@ -47,10 +47,6 @@ impl LiveSession {
         self.identity.as_ref().map(|i| i.id.as_str())
     }
 
-    pub fn is_tracking(&self) -> bool {
-        self.identity.is_some()
-    }
-
     /// Apply a detect sample. Never waits on I/O.
     pub fn apply(&mut self, sample: &DetectSample) {
         let now = sample.observed_at;
@@ -157,11 +153,11 @@ mod tests {
         let t0 = Utc::now();
         live.apply(&sample_at(t0, Some(game("steam:1", "RL"))));
         live.apply(&sample_at(t0 + Duration::seconds(3), None));
-        assert!(live.is_tracking(), "still in grace");
+        assert!(live.identity.is_some(), "still in grace");
         assert!(live.pending_ends.is_empty());
 
         live.apply(&sample_at(t0 + Duration::seconds(9), None));
-        assert!(!live.is_tracking());
+        assert!(live.identity.is_none());
         assert_eq!(live.pending_ends.len(), 1);
         assert_eq!(live.pending_ends[0].ended_at, t0);
         assert_eq!(live.pending_ends[0].started_at, t0);
@@ -175,7 +171,7 @@ mod tests {
         live.apply(&sample_at(t0 + Duration::hours(1), None));
         assert_eq!(live.pending_ends.len(), 1);
         assert_eq!(live.pending_ends[0].ended_at, t0);
-        assert!(!live.is_tracking());
+        assert!(live.identity.is_none());
     }
 
     #[test]

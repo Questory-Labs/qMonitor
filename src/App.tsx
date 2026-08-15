@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { QMark } from "./components/QMark";
 import {
   Settings,
@@ -64,13 +64,18 @@ interface TrackableGame {
   trackingEnabled: boolean;
 }
 
-function invokeTimeout<T>(cmd: string, ms = 4000): Promise<T> {
-  return Promise.race([
-    invoke<T>(cmd),
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(`${cmd} timed out`)), ms),
-    ),
-  ]);
+async function invokeTimeout<T>(cmd: string, ms = 4000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      invoke<T>(cmd),
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${cmd} timed out`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 function BrandMark({ size = "sm" }: { size?: "sm" | "md" }) {
@@ -157,6 +162,8 @@ function App() {
     setMessage(text);
   }, []);
 
+  const lastTimeoutToast = useRef<string | null>(null);
+
   const elapsed = useElapsedSecs(home?.active?.startedAt);
 
   /** Live status only — never overwrite draft settings while the user is typing. */
@@ -172,8 +179,15 @@ function App() {
       setAuth(a);
       setOnboarded(o);
       setGames(g);
+      lastTimeoutToast.current = null;
     } catch (e) {
-      showToast(String(e), true);
+      const text = String(e);
+      const isTimeout = text.includes("timed out");
+      if (isTimeout && lastTimeoutToast.current === text) {
+        return;
+      }
+      lastTimeoutToast.current = isTimeout ? text : null;
+      showToast(text, true);
     }
   }, [showToast]);
 
@@ -730,7 +744,7 @@ function App() {
             className="chip"
             title={
               sync?.lastTickAt
-                ? `Local session database · last poll ${sync.lastTickAt}${sync.loopAlive === false ? " · loop stuck" : ""}`
+                ? `Local session database · last poll ${new Date(sync.lastTickAt).toLocaleString()}${sync.loopAlive === false ? " · loop stuck" : ""}`
                 : "Local session database"
             }
           >
@@ -786,9 +800,12 @@ function App() {
               />
             </label>
             <div className="field">
-              <span>Exe or full path</span>
+              <label htmlFor="add-exe">
+                <span>Exe or full path</span>
+              </label>
               <div className="path-row">
                 <input
+                  id="add-exe"
                   value={addExe}
                   onChange={(e) => setAddExe(e.target.value)}
                   placeholder="D:\Games\Hades\Hades.exe"

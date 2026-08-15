@@ -133,11 +133,36 @@ fn is_qmonitor_log(name: &str) -> bool {
     name.starts_with("qmonitor.log")
 }
 
-/// Age + size cap. `keep_days == 0` or `max_bytes == 0` deletes every `qmonitor.log*` file.
+fn active_daily_log_name() -> Option<String> {
+    let sink_live = FILE_SINK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some();
+    if !sink_live {
+        return None;
+    }
+    Some(format!(
+        "qmonitor.log.{}",
+        chrono::Local::now().format("%Y-%m-%d")
+    ))
+}
+
+fn is_protected_log(path: &Path, active_name: Option<&str>) -> bool {
+    let Some(active) = active_name else {
+        return false;
+    };
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| name == active)
+}
+
+/// Age + size cap. `keep_days == 0` or `max_bytes == 0` deletes every `qmonitor.log*` file
+/// except the active daily file while the sink is using it.
 pub fn prune_log_dir(dir: &Path, keep_days: u64, max_bytes: u64) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
+    let active_name = active_daily_log_name();
     let mut files: Vec<(PathBuf, SystemTime, u64)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
@@ -160,6 +185,9 @@ pub fn prune_log_dir(dir: &Path, keep_days: u64, max_bytes: u64) {
 
     if keep_days == 0 || max_bytes == 0 {
         for (path, _, _) in files {
+            if is_protected_log(&path, active_name.as_deref()) {
+                continue;
+            }
             let _ = fs::remove_file(path);
         }
         return;
@@ -169,6 +197,9 @@ pub fn prune_log_dir(dir: &Path, keep_days: u64, max_bytes: u64) {
         .checked_sub(Duration::from_secs(keep_days.saturating_mul(86_400)))
         .unwrap_or(SystemTime::UNIX_EPOCH);
     files.retain(|(path, modified, _)| {
+        if is_protected_log(path, active_name.as_deref()) {
+            return true;
+        }
         if *modified < cutoff {
             let _ = fs::remove_file(path);
             false
@@ -182,6 +213,9 @@ pub fn prune_log_dir(dir: &Path, keep_days: u64, max_bytes: u64) {
     for (path, _, len) in files {
         if total <= max_bytes {
             break;
+        }
+        if is_protected_log(&path, active_name.as_deref()) {
+            continue;
         }
         if fs::remove_file(&path).is_ok() {
             total = total.saturating_sub(len);
@@ -201,6 +235,9 @@ fn file_nonblocking() -> Option<NonBlocking> {
     }
     let mut g = FILE_SINK.lock().unwrap_or_else(|e| e.into_inner());
     if g.is_none() {
+        if !FILE_ON.load(Ordering::Relaxed) {
+            return None;
+        }
         let dir = log_dir();
         let _ = fs::create_dir_all(&dir);
         let appender = tracing_appender::rolling::daily(&dir, "qmonitor.log");
@@ -247,6 +284,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GatedMakeWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn loop_alive_false_without_detect() {
@@ -313,5 +351,33 @@ mod tests {
         }
         prune_log_dir(dir.path(), 3, LOG_MAX_BYTES);
         assert!(!old.exists(), "age-pruned");
+    }
+
+    #[test]
+    fn prune_keeps_active_daily_log_over_size_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        FILE_ON.store(true, Ordering::Relaxed);
+        let appender = tracing_appender::rolling::daily(dir.path(), "qmonitor.log");
+        let (nb, guard) = tracing_appender::non_blocking(appender);
+        *FILE_SINK.lock().unwrap_or_else(|e| e.into_inner()) = Some((nb, guard));
+        struct ResetSink;
+        impl Drop for ResetSink {
+            fn drop(&mut self) {
+                drop_file_sink();
+                FILE_ON.store(false, Ordering::Relaxed);
+            }
+        }
+        let _reset = ResetSink;
+
+        let active = dir.path().join(
+            active_daily_log_name().expect("sink is active"),
+        );
+        fs::write(&active, vec![b'x'; LOG_MAX_BYTES as usize + 64]).unwrap();
+        let other = dir.path().join("qmonitor.log.2020-01-01");
+        fs::write(&other, vec![b'y'; 200]).unwrap();
+
+        prune_log_dir(dir.path(), 3, LOG_MAX_BYTES);
+        assert!(active.exists(), "active daily log preserved");
+        assert!(!other.exists(), "other logs size-pruned");
     }
 }

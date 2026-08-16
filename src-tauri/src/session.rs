@@ -1,21 +1,23 @@
-//! Session state machine: open on identity appear, end on disappear, push pending.
+//! App state, pipeline prefs, and UI-facing home snapshot.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::Serialize;
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, RwLock};
 
 use crate::auth;
 use crate::config::AppConfig;
-use crate::db::{SessionRow, TursoDb};
-use crate::detect::{foreground_pid, primary_identity, snapshot_processes};
+use crate::db::{PushStatus, SessionRow, TursoDb};
+use crate::health::RuntimeHealth;
 use crate::identity::detectable::{self, DetectableCatalog, DETECTABLE_MAX_AGE};
 use crate::identity::resolver::{parse_exe_input, IdentityPipeline, UserMapping};
 use crate::identity::{ManualGame, PendingDetection, TrackableGame};
-use crate::identity::GameIdentity;
-use crate::push::WebhookClient;
+use crate::live_session::LiveSession;
+use crate::persist::{DbView, PersistCmd};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +27,10 @@ pub struct SyncStatus {
     pub last_error: Option<String>,
     pub active_title: Option<String>,
     pub webhook_configured: bool,
+    pub last_tick_at: Option<String>,
+    pub loop_alive: bool,
+    pub db_reconnects: u64,
+    pub detect_timeouts: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,12 +44,16 @@ pub struct HomeState {
 
 pub struct AppState {
     pub config: RwLock<AppConfig>,
+    /// Test-only injected DB. Production persist owns the connection.
     pub db: RwLock<Option<Arc<TursoDb>>>,
     pub pipeline: RwLock<IdentityPipeline>,
-    pub active_identity_id: RwLock<Option<String>>,
+    pub live: RwLock<LiveSession>,
+    pub db_view: RwLock<DbView>,
+    pub health: RwLock<RuntimeHealth>,
+    pub persist_tx: Mutex<Option<tokio::sync::mpsc::Sender<PersistCmd>>>,
+    pub ignored_titles: RwLock<HashMap<String, String>>,
     pub pending_detections: RwLock<Vec<PendingDetection>>,
     pub last_error: RwLock<Option<String>>,
-    pub webhook: WebhookClient,
 }
 
 impl AppState {
@@ -74,113 +84,71 @@ impl AppState {
             config: RwLock::new(config),
             db: RwLock::new(None),
             pipeline: RwLock::new(pipeline),
-            active_identity_id: RwLock::new(None),
+            live: RwLock::new(LiveSession::default()),
+            db_view: RwLock::new(DbView::default()),
+            health: RwLock::new(RuntimeHealth::default()),
+            persist_tx: Mutex::new(None),
+            ignored_titles: RwLock::new(HashMap::new()),
             pending_detections: RwLock::new(Vec::new()),
             last_error: RwLock::new(None),
-            webhook: WebhookClient::default(),
         }
     }
 
     pub async fn connect_db(&self) -> Result<(), String> {
-        const ATTEMPTS: u32 = 8;
-        let mut last_err = String::from("db connect failed");
-        for attempt in 0..ATTEMPTS {
-            match self.connect_db_once().await {
-                Ok(()) => {
-                    // Clear a prior connect failure once we're healthy again.
-                    let mut err = self.last_error.write().await;
-                    if err
-                        .as_ref()
-                        .is_some_and(|e| e.starts_with("db connect:") || e.starts_with("db open:"))
-                    {
-                        *err = None;
-                    }
-                    return Ok(());
-                }
-                Err(e) => {
-                    last_err = e;
-                    if attempt + 1 < ATTEMPTS {
-                        let backoff_ms = 40u64.saturating_mul(2u64.pow(attempt.min(4)));
-                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-                    }
-                }
-            }
-        }
-        let msg = format!("db connect: {last_err}");
-        tracing::error!(%msg, attempts = ATTEMPTS, "local database unavailable");
-        *self.last_error.write().await = Some(msg.clone());
-        Err(msg)
-    }
-
-    async fn connect_db_once(&self) -> Result<(), String> {
-        let cfg = self.config.read().await.clone();
-        let path = cfg.resolved_db_path();
-        let db = TursoDb::open(&path).await.map_err(|e| format!("db open: {e}"))?;
-        db.ping().await.map_err(|e| format!("db ping: {e}"))?;
-        self.load_pipeline_prefs(&db).await;
-        *self.db.write().await = Some(Arc::new(db));
-        Ok(())
-    }
-
-    /// Open (or reopen) the local DB if missing or unresponsive.
-    pub async fn ensure_db(&self) -> Result<Arc<TursoDb>, String> {
-        if let Some(db) = self.db.read().await.clone() {
-            if db.ping().await.is_ok() {
-                return Ok(db);
-            }
-            tracing::warn!("local database ping failed; reconnecting");
-            *self.db.write().await = None;
-        }
-        self.connect_db().await?;
-        self.db
-            .read()
+        self.call_persist(|reply| PersistCmd::EnsureOpen { reply })
             .await
-            .clone()
-            .ok_or_else(|| "db connect succeeded but handle missing".into())
+            .map(|_| ())
     }
 
-    async fn load_pipeline_prefs(&self, db: &TursoDb) {
-        let mappings = db.list_mappings().await.unwrap_or_default();
-        let ignored = db.list_ignored().await.unwrap_or_default();
-        let manuals = db.list_manual_games().await.unwrap_or_default();
-        let mut pipe = self.pipeline.write().await;
-        pipe.user_mappings = mappings
-            .into_iter()
-            .map(|m| (m.fingerprint.clone(), m))
-            .collect();
-        pipe.ignored_identities = ignored.into_iter().map(|i| i.identity_id).collect();
-        pipe.manual_games = manuals;
+    async fn call_persist<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<T, String>>) -> PersistCmd,
+    ) -> Result<T, String> {
+        let tx = self
+            .persist_tx
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone()
+            .ok_or_else(|| "persist offline".to_string())?;
+        let (reply, rx) = oneshot::channel();
+        tx.send(make(reply))
+            .await
+            .map_err(|_| "persist offline".to_string())?;
+        tokio::time::timeout(Duration::from_secs(8), rx)
+            .await
+            .map_err(|_| "persist timeout".to_string())?
+            .map_err(|_| "persist dropped".to_string())?
+    }
+
+    async fn persist_or_db<F, Fut>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<(), String>>) -> PersistCmd,
+        fallback: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), String>>,
+    {
+        if self.persist_tx.lock().ok().and_then(|g| g.clone()).is_some() {
+            drop(fallback);
+            self.call_persist(make).await
+        } else {
+            fallback().await
+        }
     }
 
     pub async fn reload_pipeline(&self) {
         let cfg = self.config.read().await.clone();
         let steam = cfg.steam_path_override.as_ref().map(PathBuf::from);
         let catalog = cfg.catalog_path.as_ref().map(PathBuf::from);
-        let (mappings, ignored, manuals): (
-            std::collections::HashMap<String, UserMapping>,
-            HashSet<String>,
-            Vec<ManualGame>,
-        ) = if let Some(db) = self.db.read().await.as_ref() {
-            let mappings = db
-                .list_mappings()
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|m| (m.fingerprint.clone(), m))
-                .collect();
-            let ignored = db
-                .list_ignored()
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|i| i.identity_id)
-                .collect();
-            let manuals = db.list_manual_games().await.unwrap_or_default();
-            (mappings, ignored, manuals)
-        } else {
-            (Default::default(), HashSet::new(), Vec::new())
+        let (mappings, ignored, manuals) = {
+            let pipe = self.pipeline.read().await;
+            (
+                pipe.user_mappings.clone(),
+                pipe.ignored_identities.clone(),
+                pipe.manual_games.clone(),
+            )
         };
-        // Preserve in-memory detectable if already loaded; otherwise load disk cache.
         let detectable = {
             let pipe = self.pipeline.read().await;
             if pipe.detectable.is_empty() {
@@ -216,98 +184,33 @@ impl AppState {
         self.pipeline.write().await.detectable = catalog;
     }
 
-    pub async fn tick(&self) {
-        let processes = snapshot_processes();
-        let (identities, pending) = {
-            let pipe = self.pipeline.read().await;
-            pipe.resolve_running(&processes)
-        };
-        *self.pending_detections.write().await = pending;
-
-        let fg = foreground_pid();
-        let primary = primary_identity(&identities, fg, &processes).cloned();
-
-        let db = match self.ensure_db().await {
-            Ok(db) => db,
-            Err(e) => {
-                *self.last_error.write().await = Some(e);
-                return;
-            }
-        };
-
-        let prev = self.active_identity_id.read().await.clone();
-        if let Err(e) = reconcile_active_sessions(&db, primary.as_ref(), prev.as_deref()).await {
-            *self.last_error.write().await = Some(e);
-        }
-        *self.active_identity_id.write().await = primary.as_ref().map(|i| i.id.clone());
-
-        // Push due sessions
-        self.flush_pushes(&db).await;
-
-        // Periodic purge
-        let days = self.config.read().await.retention_acked_days;
-        let _ = db.purge_synced(days).await;
-    }
-
-    async fn flush_pushes(&self, db: &TursoDb) {
-        let cfg = self.config.read().await.clone();
-        let Some(webhook_url) = cfg.webhook_url() else {
-            return;
-        };
-        let Some(token) = auth::get_access_token(&cfg) else {
-            return;
-        };
-        let due = match db.list_due_pushes().await {
-            Ok(d) => d,
-            Err(e) => {
-                *self.last_error.write().await = Some(e);
-                return;
-            }
-        };
-        for row in due {
-            match self.webhook.push(&cfg, &webhook_url, &token, &row).await {
-                Ok(()) => {
-                    let _ = db.mark_synced(&row.id).await;
-                }
-                Err(e) => {
-                    let _ = db
-                        .mark_push_failed(&row.id, &e, row.retry_count + 1)
-                        .await;
-                    *self.last_error.write().await = Some(e);
-                }
-            }
-        }
-    }
-
     pub async fn home_state(&self) -> HomeState {
         let cfg = self.config.read().await.clone();
-        let mut turso_ok = false;
-        let mut pending_count = 0;
-        let mut active = None;
-        let mut history = Vec::new();
-        match self.ensure_db().await {
-            Ok(db) => {
-                turso_ok = db.ping().await.is_ok();
-                pending_count = db.count_pending().await.unwrap_or(0);
-                active = db.get_active().await.ok().flatten();
-                history = db.list_sessions(100).await.unwrap_or_default();
-            }
-            Err(e) => {
-                *self.last_error.write().await = Some(e);
-            }
-        }
+        let poll = cfg.poll_interval_secs.max(1);
+        let view = self.db_view.read().await.clone();
+        let live = self.live.read().await.clone();
+        let health = self.health.read().await.clone();
+        let last_error = health
+            .last_error
+            .clone()
+            .or(self.last_error.read().await.clone());
+        let active = overlay_active(&live, view.active.clone());
         let sync = SyncStatus {
-            turso_ok,
-            pending_count,
-            last_error: self.last_error.read().await.clone(),
+            turso_ok: view.turso_ok,
+            pending_count: view.pending_count,
+            last_error,
             active_title: active.as_ref().map(|a| a.title.clone()),
             webhook_configured: cfg.webhook_url().is_some()
                 && auth::get_access_token(&cfg).is_some(),
+            last_tick_at: health.last_detect_at.map(|t| t.to_rfc3339()),
+            loop_alive: health.loop_alive(poll),
+            db_reconnects: health.db_reconnects,
+            detect_timeouts: health.detect_timeouts,
         };
         HomeState {
             sync,
             active,
-            history,
+            history: view.history,
             pending_detections: self.pending_detections.read().await.clone(),
         }
     }
@@ -319,55 +222,92 @@ impl AppState {
             title: title.clone(),
             identity_id: identity_id.clone(),
         };
-        if let Some(db) = self.db.read().await.as_ref() {
-            db.upsert_mapping(&mapping.fingerprint, &mapping.title, &mapping.identity_id)
-                .await?;
-            // Confirming implies tracking — clear any prior ignore.
-            let _ = db.remove_ignored(&identity_id).await;
-        }
         {
             let mut pipe = self.pipeline.write().await;
             pipe.ignored_identities.remove(&identity_id);
-            pipe.user_mappings.insert(fingerprint, mapping);
+            pipe.user_mappings.insert(fingerprint.clone(), mapping);
         }
+        self.persist_or_db(
+            |reply| PersistCmd::Confirm {
+                fingerprint: fingerprint.clone(),
+                title: title.clone(),
+                reply,
+            },
+            || async {
+                if let Some(db) = self.db.read().await.as_ref() {
+                    db.upsert_mapping(&fingerprint, &title, &identity_id)
+                        .await?;
+                    let _ = db.remove_ignored(&identity_id).await;
+                }
+                Ok(())
+            },
+        )
+        .await?;
         Ok(())
     }
 
     pub async fn ignore_game(&self, identity_id: String, title: String) -> Result<(), String> {
-        if let Some(db) = self.db.read().await.as_ref() {
-            db.upsert_ignored(&identity_id, &title).await?;
-            // Don't track ⇒ drop any in-flight session without pushing.
-            let actives = db.list_active().await.unwrap_or_default();
-            let discard_ids: Vec<String> = actives
-                .into_iter()
-                .filter(|s| s.identity_id == identity_id)
-                .map(|s| s.id)
-                .collect();
-            if !discard_ids.is_empty() {
-                let _ = db.discard_active_sessions(&discard_ids).await;
-            }
-            let prev = self.active_identity_id.read().await.clone();
-            if prev.as_deref() == Some(identity_id.as_str()) {
-                *self.active_identity_id.write().await = None;
+        {
+            let mut live = self.live.write().await;
+            if live.identity_id() == Some(identity_id.as_str()) {
+                live.clear_identity();
             }
         }
         self.pipeline
             .write()
             .await
             .ignored_identities
-            .insert(identity_id);
+            .insert(identity_id.clone());
+        self.ignored_titles
+            .write()
+            .await
+            .insert(identity_id.clone(), title.clone());
+        self.persist_or_db(
+            |reply| PersistCmd::Ignore {
+                identity_id: identity_id.clone(),
+                title: title.clone(),
+                reply,
+            },
+            || async {
+                if let Some(db) = self.db.read().await.as_ref() {
+                    db.upsert_ignored(&identity_id, &title).await?;
+                    let actives = db.list_active().await.unwrap_or_default();
+                    let discard_ids: Vec<String> = actives
+                        .into_iter()
+                        .filter(|s| s.identity_id == identity_id)
+                        .map(|s| s.id)
+                        .collect();
+                    if !discard_ids.is_empty() {
+                        let _ = db.discard_active_sessions(&discard_ids).await;
+                    }
+                }
+                Ok(())
+            },
+        )
+        .await?;
         Ok(())
     }
 
     pub async fn unignore_game(&self, identity_id: String) -> Result<(), String> {
-        if let Some(db) = self.db.read().await.as_ref() {
-            db.remove_ignored(&identity_id).await?;
-        }
         self.pipeline
             .write()
             .await
             .ignored_identities
             .remove(&identity_id);
+        self.ignored_titles.write().await.remove(&identity_id);
+        self.persist_or_db(
+            |reply| PersistCmd::Unignore {
+                identity_id: identity_id.clone(),
+                reply,
+            },
+            || async {
+                if let Some(db) = self.db.read().await.as_ref() {
+                    db.remove_ignored(&identity_id).await?;
+                }
+                Ok(())
+            },
+        )
+        .await?;
         Ok(())
     }
 
@@ -393,90 +333,67 @@ impl AppState {
         let identity_id = steam_app_id
             .map(|sid| format!("steam:{sid}"))
             .unwrap_or_else(|| format!("manual:{}", game.id));
-        if let Some(db) = self.db.read().await.as_ref() {
-            db.upsert_manual_game(&game).await?;
-            let _ = db.remove_ignored(&identity_id).await;
-        }
         {
             let mut pipe = self.pipeline.write().await;
             pipe.ignored_identities.remove(&identity_id);
-            // Replace existing entry with same exe+hint if present.
-            pipe.manual_games
-                .retain(|g| !(g.exe_name.eq_ignore_ascii_case(&game.exe_name)
-                    && g.path_hint == game.path_hint));
+            pipe.manual_games.retain(|g| {
+                !(g.exe_name.eq_ignore_ascii_case(&game.exe_name) && g.path_hint == game.path_hint)
+            });
             pipe.manual_games.push(game.clone());
         }
+        self.persist_or_db(
+            |reply| PersistCmd::AddManual {
+                game: game.clone(),
+                identity_id: identity_id.clone(),
+                reply,
+            },
+            || async {
+                if let Some(db) = self.db.read().await.as_ref() {
+                    db.upsert_manual_game(&game).await?;
+                    let _ = db.remove_ignored(&identity_id).await;
+                }
+                Ok(())
+            },
+        )
+        .await?;
         Ok(game)
     }
 }
 
-/// DB-authoritative session reconcile. Call every tick so process restarts cannot
-/// leave orphan `active` rows or open duplicates.
-pub async fn reconcile_active_sessions(
-    db: &TursoDb,
-    primary: Option<&GameIdentity>,
-    prev_identity_id: Option<&str>,
-) -> Result<(), String> {
-    let actives = db.list_active().await?;
-
-    match primary {
-        Some(identity) => {
-            // End (push) actives for other identities — real switch / leftover.
-            for row in actives.iter().filter(|s| s.identity_id != identity.id) {
-                db.end_session(&row.id).await?;
-            }
-
-            let mut same: Vec<_> = actives
-                .into_iter()
-                .filter(|s| s.identity_id == identity.id)
-                .collect();
-            // list_active is oldest-first, but sort defensively.
-            same.sort_by_key(|s| s.started_at);
-
-            if same.is_empty() {
-                db.open_session(identity).await?;
-            } else {
-                // Keep oldest continuous session; discard restart duplicates.
-                let discard_ids: Vec<String> = same.iter().skip(1).map(|s| s.id.clone()).collect();
-                if !discard_ids.is_empty() {
-                    db.discard_active_sessions(&discard_ids).await?;
-                }
-            }
-        }
-        None => {
-            if prev_identity_id.is_some() {
-                // Monitor was tracking something; game quit → end and push.
-                for row in &actives {
-                    db.end_session(&row.id).await?;
-                }
-            } else {
-                // Cold start / restart with nothing running → discard orphans (no webhook spam).
-                let ids: Vec<String> = actives.into_iter().map(|s| s.id).collect();
-                if !ids.is_empty() {
-                    tracing::warn!(
-                        count = ids.len(),
-                        "discarding orphaned active sessions after cold idle reconcile"
-                    );
-                    db.discard_active_sessions(&ids).await?;
-                }
-            }
-        }
+fn overlay_active(live: &LiveSession, db_active: Option<SessionRow>) -> Option<SessionRow> {
+    let Some(identity) = live.identity.as_ref() else {
+        return db_active;
+    };
+    if db_active
+        .as_ref()
+        .is_some_and(|a| a.identity_id == identity.id)
+    {
+        return db_active;
     }
-    Ok(())
+    Some(SessionRow {
+        id: live
+            .db_session_id
+            .clone()
+            .unwrap_or_else(|| format!("live:{}", identity.id)),
+        identity_id: identity.id.clone(),
+        title: identity.title.clone(),
+        steam_app_id: identity.steam_app_id,
+        exe: identity.exe.clone(),
+        source: identity.source.clone(),
+        started_at: live.started_at.unwrap_or_else(chrono::Utc::now),
+        ended_at: None,
+        duration_secs: None,
+        push_status: PushStatus::Active,
+        acked_at: None,
+        retry_count: 0,
+        next_retry_at: None,
+        last_error: None,
+    })
 }
 
+
 pub async fn list_trackable_games(state: &AppState) -> Vec<TrackableGame> {
-    let ignored_titles: std::collections::HashMap<String, String> =
-        if let Some(db) = state.db.read().await.as_ref() {
-            db.list_ignored()
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|i| (i.identity_id, i.title))
-                .collect()
-        } else {
-            Default::default()
-        };
+    let ignored_titles = state.ignored_titles.read().await.clone();
 
     let pipe = state.pipeline.read().await;
     let ignored = &pipe.ignored_identities;
@@ -559,8 +476,10 @@ pub async fn list_trackable_games(state: &AppState) -> Vec<TrackableGame> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{PushStatus, TursoDb};
+    use crate::db::TursoDb;
     use crate::identity::{Confidence, GameIdentity};
+    use crate::live_session::{DetectSample, LiveSession};
+    use crate::persist::flush_live;
     use chrono::{Duration, Utc};
     use tempfile::tempdir;
 
@@ -574,105 +493,6 @@ mod tests {
             source: "test".into(),
             fingerprint: None,
         }
-    }
-
-    #[tokio::test]
-    async fn reconcile_keeps_oldest_discards_duplicates_when_still_playing() {
-        let dir = tempdir().unwrap();
-        let db = TursoDb::open(dir.path().join("r1.db")).await.unwrap();
-        let apex = identity("steam:1172470", "Apex");
-        let older = db
-            .force_insert_active(&apex, Utc::now() - Duration::minutes(20))
-            .await
-            .unwrap();
-        let newer = db
-            .force_insert_active(&apex, Utc::now() - Duration::minutes(5))
-            .await
-            .unwrap();
-
-        reconcile_active_sessions(&db, Some(&apex), None)
-            .await
-            .unwrap();
-
-        let actives = db.list_active().await.unwrap();
-        assert_eq!(actives.len(), 1);
-        assert_eq!(actives[0].id, older.id);
-        assert!(db.get_session(&newer.id).await.unwrap().is_none());
-        assert!(db.list_due_pushes().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn reconcile_ends_other_identity_and_opens_current() {
-        let dir = tempdir().unwrap();
-        let db = TursoDb::open(dir.path().join("r2.db")).await.unwrap();
-        let a = identity("steam:1", "A");
-        let b = identity("steam:2", "B");
-        let old = db.open_session(&a).await.unwrap();
-
-        reconcile_active_sessions(&db, Some(&b), Some("steam:1"))
-            .await
-            .unwrap();
-
-        let ended = db.get_session(&old.id).await.unwrap().unwrap();
-        assert_eq!(ended.push_status, PushStatus::Pending);
-        assert!(ended.ended_at.is_some());
-
-        let actives = db.list_active().await.unwrap();
-        assert_eq!(actives.len(), 1);
-        assert_eq!(actives[0].identity_id, "steam:2");
-    }
-
-    #[tokio::test]
-    async fn reconcile_cold_idle_discards_orphans_without_push() {
-        let dir = tempdir().unwrap();
-        let db = TursoDb::open(dir.path().join("r3.db")).await.unwrap();
-        let apex = identity("steam:1172470", "Apex");
-        db.force_insert_active(&apex, Utc::now() - Duration::hours(1))
-            .await
-            .unwrap();
-        db.force_insert_active(&apex, Utc::now() - Duration::minutes(30))
-            .await
-            .unwrap();
-
-        reconcile_active_sessions(&db, None, None).await.unwrap();
-
-        assert!(db.list_active().await.unwrap().is_empty());
-        assert!(db.list_due_pushes().await.unwrap().is_empty());
-        assert!(db.list_sessions(10).await.unwrap().is_empty());
-    }
-
-    /// Game quit (`primary = None`) ends and queues push on that tick — no end-grace.
-    #[tokio::test]
-    async fn reconcile_warm_idle_ends_and_queues_push() {
-        let dir = tempdir().unwrap();
-        let db = TursoDb::open(dir.path().join("r4.db")).await.unwrap();
-        let apex = identity("steam:1172470", "Apex");
-        let row = db.open_session(&apex).await.unwrap();
-
-        reconcile_active_sessions(&db, None, Some("steam:1172470"))
-            .await
-            .unwrap();
-
-        assert!(db.list_active().await.unwrap().is_empty());
-        let due = db.list_due_pushes().await.unwrap();
-        assert_eq!(due.len(), 1);
-        assert_eq!(due[0].id, row.id);
-        assert_eq!(due[0].push_status, PushStatus::Pending);
-    }
-
-    #[tokio::test]
-    async fn reconcile_opens_when_playing_with_no_active() {
-        let dir = tempdir().unwrap();
-        let db = TursoDb::open(dir.path().join("r5.db")).await.unwrap();
-        let apex = identity("steam:1172470", "Apex");
-
-        reconcile_active_sessions(&db, Some(&apex), None)
-            .await
-            .unwrap();
-
-        let actives = db.list_active().await.unwrap();
-        assert_eq!(actives.len(), 1);
-        assert_eq!(actives[0].identity_id, "steam:1172470");
     }
 
     #[tokio::test]
@@ -690,7 +510,7 @@ mod tests {
             .await
             .unwrap();
         *state.db.write().await = Some(std::sync::Arc::new(db));
-        *state.active_identity_id.write().await = Some("steam:1172470".into());
+        state.live.write().await.identity = Some(apex);
 
         state
             .ignore_game("steam:1172470".into(), "Apex".into())
@@ -702,7 +522,7 @@ mod tests {
         assert!(db.get_session(&older.id).await.unwrap().is_none());
         assert!(db.get_session(&newer.id).await.unwrap().is_none());
         assert!(db.list_due_pushes().await.unwrap().is_empty());
-        assert!(state.active_identity_id.read().await.is_none());
+        assert!(state.live.read().await.identity.is_none());
         assert!(state
             .pipeline
             .read()
@@ -712,19 +532,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_db_opens_missing_handle() {
+    async fn detect_updates_live_when_persist_is_offline() {
         let state = AppState::new();
+        let t0 = Utc::now();
+        let sample = DetectSample {
+            observed_at: t0,
+            primary: Some(identity("steam:1", "RL")),
+        };
+        state.live.write().await.apply(&sample);
+        let home = state.home_state().await;
+        assert_eq!(home.active.as_ref().map(|a| a.identity_id.as_str()), Some("steam:1"));
+        assert!(!home.sync.turso_ok);
+        state.live.write().await.apply(&DetectSample {
+            observed_at: t0 + Duration::seconds(9),
+            primary: None,
+        });
+        assert_eq!(state.live.read().await.pending_ends.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn overlay_shows_live_when_db_view_empty() {
+        let mut live = LiveSession::default();
+        live.apply(&DetectSample {
+            observed_at: Utc::now(),
+            primary: Some(identity("steam:1", "RL")),
+        });
+        let row = overlay_active(&live, None).unwrap();
+        assert_eq!(row.identity_id, "steam:1");
+        assert_eq!(row.push_status, crate::db::PushStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn flush_live_opens_when_playing() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("ensure.db");
-        {
-            let mut cfg = state.config.write().await;
-            cfg.db_path = Some(path.to_string_lossy().to_string());
-        }
-        assert!(state.db.read().await.is_none());
-        let db = state.ensure_db().await.expect("ensure");
-        assert!(db.ping().await.is_ok());
-        // Second call reuses the live handle.
-        let db2 = state.ensure_db().await.expect("ensure again");
-        assert!(db2.ping().await.is_ok());
+        let db = TursoDb::open(dir.path().join("open.db")).await.unwrap();
+        let mut live = LiveSession::default();
+        live.apply(&DetectSample {
+            observed_at: Utc::now(),
+            primary: Some(identity("steam:1172470", "Apex")),
+        });
+        flush_live(&db, &mut live).await.unwrap();
+        let actives = db.list_active().await.unwrap();
+        assert_eq!(actives.len(), 1);
+        assert_eq!(actives[0].identity_id, "steam:1172470");
     }
 }

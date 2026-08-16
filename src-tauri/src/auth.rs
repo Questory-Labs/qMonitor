@@ -1,7 +1,10 @@
 //! Device login token storage, health detect, and OAuth token calls.
 
+use std::sync::{Mutex, OnceLock};
+
 use keyring::Entry;
 use serde::Deserialize;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::config::{
     AppConfig, DetectedService, KEYRING_ACCESS, KEYRING_SERVICE, KEYRING_SESSION,
@@ -9,6 +12,7 @@ use crate::config::{
 use crate::device;
 use crate::oauth_loopback::REDIRECT_URI;
 use crate::pkce;
+use crate::push::http_client;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,21 +45,97 @@ struct TokenResponse {
     refresh_token: Option<String>,
 }
 
+#[derive(Default)]
+struct TokenCache {
+    access: Option<String>,
+    refresh: Option<String>,
+    keyring_hydrated: bool,
+}
+
+fn token_cache() -> &'static Mutex<TokenCache> {
+    static CACHE: OnceLock<Mutex<TokenCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(TokenCache::default()))
+}
+
+fn refresh_lock() -> &'static AsyncMutex<()> {
+    static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| AsyncMutex::new(()))
+}
+
+fn cache_put(access: Option<&str>, refresh: Option<&str>) {
+    if let Ok(mut c) = token_cache().lock() {
+        if let Some(a) = access {
+            c.access = Some(a.to_string());
+        }
+        if let Some(r) = refresh {
+            c.refresh = Some(r.to_string());
+        }
+    }
+}
+
+fn cache_clear() {
+    if let Ok(mut c) = token_cache().lock() {
+        c.access = None;
+        c.refresh = None;
+        c.keyring_hydrated = true;
+    }
+}
+
+fn keyring_get(key: &str) -> Result<Option<String>, String> {
+    let entry = Entry::new(KEYRING_SERVICE, key).map_err(|e| e.to_string())?;
+    match entry.get_password() {
+        Ok(p) if !p.is_empty() => Ok(Some(p)),
+        Ok(_) => Ok(None),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn hydrate_keyring_once(cache: &mut TokenCache) {
+    if cache.keyring_hydrated {
+        return;
+    }
+    cache.keyring_hydrated = true;
+    match keyring_get(KEYRING_ACCESS) {
+        Ok(v) => {
+            if cache.access.is_none() {
+                cache.access = v;
+            }
+        }
+        Err(e) => tracing::warn!(%e, "keyring access read failed; keeping cache"),
+    }
+    match keyring_get(KEYRING_SESSION) {
+        Ok(v) => {
+            if cache.refresh.is_none() {
+                cache.refresh = v;
+            }
+        }
+        Err(e) => tracing::warn!(%e, "keyring refresh read failed; keeping cache"),
+    }
+}
+
+fn keyring_set(key: &str, value: &str, what: &str) {
+    match Entry::new(KEYRING_SERVICE, key) {
+        Ok(entry) => {
+            if let Err(e) = entry.set_password(value) {
+                tracing::warn!(%e, "{what} write failed; token cached in memory");
+            }
+        }
+        Err(e) => tracing::warn!(%e, "{what} write failed; token cached in memory"),
+    }
+}
+
 pub fn store_tokens(access: &str, refresh: Option<&str>) -> Result<(), String> {
-    Entry::new(KEYRING_SERVICE, KEYRING_ACCESS)
-        .map_err(|e| e.to_string())?
-        .set_password(access)
-        .map_err(|e| e.to_string())?;
+    cache_put(Some(access), refresh);
+    keyring_set(KEYRING_ACCESS, access, "keyring access");
     if let Some(s) = refresh {
-        Entry::new(KEYRING_SERVICE, KEYRING_SESSION)
-            .map_err(|e| e.to_string())?
-            .set_password(s)
-            .map_err(|e| e.to_string())?;
+        keyring_set(KEYRING_SESSION, s, "keyring refresh");
     }
     Ok(())
 }
 
 pub fn clear_tokens() -> Result<(), String> {
+    cache_clear();
     let _ = Entry::new(KEYRING_SERVICE, KEYRING_ACCESS)
         .ok()
         .and_then(|e| e.delete_credential().ok());
@@ -71,15 +151,15 @@ pub fn get_access_token(cfg: &AppConfig) -> Option<String> {
             return Some(dev.clone());
         }
     }
-    Entry::new(KEYRING_SERVICE, KEYRING_ACCESS)
-        .ok()
-        .and_then(|e| e.get_password().ok())
+    let mut cache = token_cache().lock().ok()?;
+    hydrate_keyring_once(&mut cache);
+    cache.access.clone()
 }
 
 pub fn get_refresh_token() -> Option<String> {
-    Entry::new(KEYRING_SERVICE, KEYRING_SESSION)
-        .ok()
-        .and_then(|e| e.get_password().ok())
+    let mut cache = token_cache().lock().ok()?;
+    hydrate_keyring_once(&mut cache);
+    cache.refresh.clone()
 }
 
 pub fn auth_state(cfg: &AppConfig) -> Option<AuthState> {
@@ -158,7 +238,7 @@ pub async fn exchange_authorization_code(
         return Err("state mismatch".into());
     }
     let token_url = cfg.token_url().ok_or("api root not configured")?;
-    let client = reqwest::Client::new();
+    let client = http_client();
     let res = client
         .post(&token_url)
         .json(&serde_json::json!({
@@ -183,10 +263,11 @@ pub async fn exchange_authorization_code(
 }
 
 pub async fn refresh_access_token(cfg: &AppConfig) -> Result<String, String> {
+    let _guard = refresh_lock().lock().await;
     let refresh = get_refresh_token().ok_or("no refresh token")?;
     let device_id = device::device_id()?;
     let token_url = cfg.token_url().ok_or("api root not configured")?;
-    let client = reqwest::Client::new();
+    let client = http_client();
     let res = client
         .post(&token_url)
         .json(&serde_json::json!({
@@ -215,7 +296,7 @@ pub async fn revoke_remote(cfg: &AppConfig) -> Result<(), String> {
     let Some(token) = token else {
         return Ok(());
     };
-    let client = reqwest::Client::new();
+    let client = http_client();
     let mut body = serde_json::json!({
         "token": token,
         "client_id": "qmonitor",
@@ -274,5 +355,21 @@ mod tests {
         .unwrap();
         assert_eq!(c, "abc");
         assert_eq!(s, "xyz");
+    }
+
+    #[test]
+    fn cache_survives_without_keyring_and_clears() {
+        cache_put(Some("access-1"), Some("refresh-1"));
+        let cfg = AppConfig::default();
+        assert_eq!(get_access_token(&cfg).as_deref(), Some("access-1"));
+        assert_eq!(get_refresh_token().as_deref(), Some("refresh-1"));
+        cache_clear();
+        // Hydrated empty cache: no keyring token in CI.
+        let mut c = token_cache().lock().unwrap();
+        c.keyring_hydrated = true;
+        c.access = None;
+        c.refresh = None;
+        drop(c);
+        assert!(get_access_token(&cfg).is_none());
     }
 }

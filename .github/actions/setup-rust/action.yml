@@ -1,0 +1,17 @@
+name: Setup Rust
+description: Install stable Rust and share the src-tauri cargo cache across CI, canary, and release.
+
+inputs:
+  platform:
+    description: rust-cache shared-key (linux or windows)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: src-tauri
+        shared-key: ${{ inputs.platform }}
+        save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release' }}

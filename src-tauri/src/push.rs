@@ -1,10 +1,16 @@
 //! Webhook push client for completed sessions.
 
+use std::time::Duration;
+
 use serde::Serialize;
 
 use crate::auth;
 use crate::config::AppConfig;
 use crate::db::SessionRow;
+
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+pub const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Serialize)]
 pub struct SessionPayload {
@@ -51,19 +57,30 @@ impl SessionPayload {
     }
 }
 
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+        .build()
+        .expect("reqwest client")
+}
+
 pub struct WebhookClient {
     http: reqwest::Client,
 }
 
 impl Default for WebhookClient {
     fn default() -> Self {
-        Self {
-            http: reqwest::Client::new(),
-        }
+        Self::new()
     }
 }
 
 impl WebhookClient {
+    pub fn new() -> Self {
+        Self { http: http_client() }
+    }
+
     pub async fn push(
         &self,
         cfg: &AppConfig,
@@ -133,5 +150,14 @@ mod tests {
         assert_eq!(p.schema_version, 1);
         assert_eq!(p.steam_app_id, Some(570));
         assert_eq!(p.duration_secs, 120);
+    }
+
+    #[test]
+    fn http_client_builds_with_timeouts() {
+        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(8));
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(15));
+        assert_eq!(POOL_IDLE_TIMEOUT, Duration::from_secs(60));
+        let _ = http_client();
+        let _ = WebhookClient::new();
     }
 }

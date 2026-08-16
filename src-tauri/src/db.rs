@@ -57,8 +57,8 @@ pub struct SessionRow {
 }
 
 pub struct TursoDb {
-    #[allow(dead_code)]
-    db: Database,
+    /// Held so the connection is not dropped with the builder handle.
+    _db: Database,
     conn: Connection,
 }
 
@@ -74,7 +74,7 @@ impl TursoDb {
             .await
             .map_err(|e| format!("turso open: {e}"))?;
         let conn = db.connect().map_err(|e| format!("turso conn: {e}"))?;
-        let this = Self { db, conn };
+        let this = Self { _db: db, conn };
         this.migrate().await?;
         Ok(this)
     }
@@ -126,8 +126,12 @@ impl TursoDb {
         Ok(())
     }
 
-    pub async fn open_session(&self, identity: &GameIdentity) -> Result<SessionRow, String> {
-        // Never create a second active for the same identity (restart / race safety).
+    /// Open (or reuse) an active row. Existing DB `started_at` wins over `started_at`.
+    pub async fn open_session_at(
+        &self,
+        identity: &GameIdentity,
+        started_at: DateTime<Utc>,
+    ) -> Result<SessionRow, String> {
         if let Some(existing) = self
             .list_active()
             .await?
@@ -145,7 +149,7 @@ impl TursoDb {
             steam_app_id: identity.steam_app_id,
             exe: identity.exe.clone(),
             source: identity.source.clone(),
-            started_at: Utc::now(),
+            started_at,
             ended_at: None,
             duration_secs: None,
             push_status: PushStatus::Active,
@@ -253,17 +257,29 @@ impl TursoDb {
         Ok(())
     }
 
-    pub async fn end_session(&self, id: &str) -> Result<SessionRow, String> {
+    pub async fn end_session_at(
+        &self,
+        id: &str,
+        ended_at: DateTime<Utc>,
+    ) -> Result<SessionRow, String> {
         let mut row = self
             .get_session(id)
             .await?
             .ok_or_else(|| "missing".to_string())?;
-        let ended = Utc::now();
+        if row.push_status != PushStatus::Active {
+            return Ok(row);
+        }
+        let ended = if ended_at < row.started_at {
+            row.started_at
+        } else {
+            ended_at
+        };
         let duration = (ended - row.started_at).num_seconds().max(0);
+        let next_retry_at = Utc::now();
         row.ended_at = Some(ended);
         row.duration_secs = Some(duration);
         row.push_status = PushStatus::Pending;
-        row.next_retry_at = Some(Utc::now());
+        row.next_retry_at = Some(next_retry_at);
         self.conn
             .execute(
                 r#"UPDATE sessions SET ended_at=?, duration_secs=?, push_status=?, next_retry_at=? WHERE id=?"#,
@@ -271,7 +287,7 @@ impl TursoDb {
                     ended.to_rfc3339(),
                     duration,
                     PushStatus::Pending.as_str(),
-                    Utc::now().to_rfc3339(),
+                    next_retry_at.to_rfc3339(),
                     id,
                 ),
             )
@@ -637,9 +653,9 @@ mod tests {
         let path = dir.path().join("test.db");
         let db = TursoDb::open(&path).await.expect("open");
         db.ping().await.expect("ping");
-        let row = db.open_session(&sample_identity()).await.unwrap();
+        let row = db.open_session_at(&sample_identity(), Utc::now()).await.unwrap();
         assert_eq!(row.push_status, PushStatus::Active);
-        let ended = db.end_session(&row.id).await.unwrap();
+        let ended = db.end_session_at(&row.id, Utc::now()).await.unwrap();
         assert_eq!(ended.push_status, PushStatus::Pending);
         db.mark_synced(&row.id).await.unwrap();
         // Force old ack via SQL
@@ -662,8 +678,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("dup.db");
         let db = TursoDb::open(&path).await.expect("open");
-        let a = db.open_session(&sample_identity()).await.unwrap();
-        let b = db.open_session(&sample_identity()).await.unwrap();
+        let a = db.open_session_at(&sample_identity(), Utc::now()).await.unwrap();
+        let b = db.open_session_at(&sample_identity(), Utc::now()).await.unwrap();
         assert_eq!(a.id, b.id);
         assert_eq!(db.list_active().await.unwrap().len(), 1);
     }
@@ -673,7 +689,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("discard.db");
         let db = TursoDb::open(&path).await.expect("open");
-        let row = db.open_session(&sample_identity()).await.unwrap();
+        let row = db.open_session_at(&sample_identity(), Utc::now()).await.unwrap();
         db.discard_session(&row.id).await.unwrap();
         assert!(db.list_active().await.unwrap().is_empty());
         assert!(db.list_due_pushes().await.unwrap().is_empty());

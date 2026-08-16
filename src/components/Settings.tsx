@@ -1,8 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { QMark } from "./QMark";
 import { UpdateSettings, type UpdateChannel } from "./UpdateSettings";
+
+export type LogLevel = "off" | "error" | "warn" | "info" | "debug";
 
 export interface AppConfig {
   baseUrl?: string;
@@ -19,6 +22,7 @@ export interface AppConfig {
   minimizeToTray: boolean;
   closeToTray: boolean;
   updateChannel: UpdateChannel;
+  logLevel?: LogLevel;
   devAccessToken?: string;
 }
 
@@ -113,14 +117,55 @@ export function Settings({
     }
   }
 
+  async function openLogs() {
+    try {
+      const path = await invoke<string>("open_log_dir");
+      showToast(`Opened ${path}`);
+    } catch (e) {
+      showToast(String(e), true);
+    }
+  }
+
   async function openDb() {
     try {
       const path = await invoke<string>("open_db");
       showToast(`Opened ${path}`);
-      await refresh();
     } catch (e) {
       showToast(String(e), true);
     }
+  }
+
+  async function browsePath(
+    title: string,
+    filters: { name: string; extensions: string[] }[],
+  ): Promise<string | undefined> {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        title,
+        filters,
+      });
+      if (typeof selected === "string" && selected) return selected;
+    } catch (e) {
+      showToast(String(e), true);
+    }
+  }
+
+  async function browseCatalog() {
+    const path = await browsePath("Choose catalog file", [
+      { name: "JSON", extensions: ["json"] },
+      { name: "All files", extensions: ["*"] },
+    ]);
+    if (path) setConfig({ ...config, catalogPath: path });
+  }
+
+  async function browseDb() {
+    const path = await browsePath("Choose database file", [
+      { name: "Database", extensions: ["db", "sqlite", "sqlite3"] },
+      { name: "All files", extensions: ["*"] },
+    ]);
+    if (path) setConfig({ ...config, dbPath: path });
   }
 
   async function signOut() {
@@ -298,57 +343,125 @@ export function Settings({
 
       <details className="settings-card settings-advanced">
         <summary>Advanced</summary>
-        <label className="field">
-          <span>Catalog path</span>
-          <input
-            value={config.catalogPath ?? ""}
-            onChange={(e) =>
-              setConfig({ ...config, catalogPath: e.target.value })
-            }
-            placeholder="catalogs/games.example.json"
-          />
-        </label>
-        <label className="field">
-          <span>Detectable catalog URL</span>
-          <input
-            value={config.detectableUrl ?? ""}
-            onChange={(e) =>
-              setConfig({ ...config, detectableUrl: e.target.value })
-            }
-            placeholder="https://discord.com/api/v10/applications/detectable"
-          />
-        </label>
-        <div className="field">
-          <div className="field-head">
-            <span>Database path</span>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => void openDb()}
-            >
-              Open DB
-            </button>
+
+        <div className="advanced-group">
+          <h3 className="advanced-group-label">Catalog</h3>
+          <div className="field">
+            <span>Catalog path</span>
+            <div className="path-row">
+              <input
+                value={config.catalogPath ?? ""}
+                onChange={(e) =>
+                  setConfig({ ...config, catalogPath: e.target.value })
+                }
+                placeholder="catalogs/games.example.json"
+                aria-label="Catalog path"
+              />
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => void browseCatalog()}
+              >
+                Browse
+              </button>
+            </div>
           </div>
-          <input
-            value={config.dbPath ?? ""}
-            onChange={(e) => setConfig({ ...config, dbPath: e.target.value })}
-            placeholder="Default: config dir / qmonitor.db"
-            aria-label="Database path"
-          />
+          <label className="field">
+            <span>Detectable catalog URL</span>
+            <input
+              value={config.detectableUrl ?? ""}
+              onChange={(e) =>
+                setConfig({ ...config, detectableUrl: e.target.value })
+              }
+              placeholder="https://discord.com/api/v10/applications/detectable"
+            />
+          </label>
         </div>
-        <label className="field">
-          <span>Dev access token</span>
-          <input
-            type="password"
-            value={config.devAccessToken ?? ""}
-            onChange={(e) =>
-              setConfig({
-                ...config,
-                devAccessToken: e.target.value,
-              })
-            }
-          />
-        </label>
+
+        <div className="advanced-group">
+          <h3 className="advanced-group-label">Logging</h3>
+          <div className="field">
+            <div className="field-head">
+              <span>Log level</span>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => void openLogs()}
+              >
+                Open folder
+              </button>
+            </div>
+            <select
+              value={config.logLevel ?? "off"}
+              onChange={(e) =>
+                void saveSettings({
+                  ...config,
+                  logLevel: e.target.value as LogLevel,
+                })
+              }
+              aria-label="Log level"
+            >
+              <option value="off">Off</option>
+              <option value="error">Error</option>
+              <option value="warn">Warn</option>
+              <option value="info">Info</option>
+              <option value="debug">Debug</option>
+            </select>
+            <p className="setting-row-hint">
+              Off by default · 3 days · 5 MB cap
+            </p>
+          </div>
+        </div>
+
+        <div className="advanced-group">
+          <h3 className="advanced-group-label">Database</h3>
+          <div className="field">
+            <div className="field-head">
+              <span>Path</span>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => void openDb()}
+              >
+                Open DB
+              </button>
+            </div>
+            <div className="path-row">
+              <input
+                value={config.dbPath ?? ""}
+                onChange={(e) =>
+                  setConfig({ ...config, dbPath: e.target.value })
+                }
+                placeholder="Default: config dir / qmonitor.db"
+                aria-label="Database path"
+              />
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => void browseDb()}
+              >
+                Browse
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="advanced-group">
+          <h3 className="advanced-group-label">Dev</h3>
+          <label className="field">
+            <span>Access token</span>
+            <input
+              type="password"
+              value={config.devAccessToken ?? ""}
+              onChange={(e) =>
+                setConfig({
+                  ...config,
+                  devAccessToken: e.target.value,
+                })
+              }
+            />
+          </label>
+        </div>
       </details>
 
       <button

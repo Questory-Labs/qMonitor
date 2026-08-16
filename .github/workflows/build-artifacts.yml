@@ -83,12 +83,9 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust
         with:
-          workspaces: src-tauri
-          shared-key: ${{ matrix.platform }}-${{ needs.prepare.outputs.version }}
+          platform: ${{ matrix.platform }}
 
       - run: pnpm install --frozen-lockfile
 

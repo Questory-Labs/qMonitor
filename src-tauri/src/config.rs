@@ -23,6 +23,33 @@ pub enum DetectedService {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    #[default]
+    Off,
+    Error,
+    Warn,
+    Info,
+    Debug,
+}
+
+impl LogLevel {
+    pub fn env_filter(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Error => "qmonitor_lib=error,qmonitor=error",
+            Self::Warn => "qmonitor_lib=warn,qmonitor=warn",
+            Self::Info => "qmonitor_lib=info,qmonitor=info",
+            Self::Debug => "qmonitor_lib=debug,qmonitor=debug",
+        }
+    }
+
+    pub fn file_enabled(self) -> bool {
+        self != Self::Off
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum UpdateChannel {
     #[default]
     Stable,
@@ -56,6 +83,9 @@ pub struct AppConfig {
     /// GitHub release channel to poll for updates (stable = Latest, canary = newest prerelease).
     #[serde(default)]
     pub update_channel: UpdateChannel,
+    /// File log verbosity. Default off — no log files.
+    #[serde(default)]
+    pub log_level: LogLevel,
     /// Dev fallback when device login is unavailable.
     pub dev_access_token: Option<String>,
 }
@@ -77,6 +107,7 @@ impl Default for AppConfig {
             minimize_to_tray: false,
             close_to_tray: false,
             update_channel: UpdateChannel::Stable,
+            log_level: LogLevel::Off,
             dev_access_token: None,
         }
     }
@@ -184,6 +215,17 @@ mod tests {
         assert_eq!(cfg.update_channel, UpdateChannel::Stable);
         assert!(!cfg.minimize_to_tray);
         assert!(!cfg.close_to_tray);
+        assert_eq!(cfg.log_level, LogLevel::Off);
+    }
+
+    #[test]
+    fn log_level_roundtrip() {
+        let mut cfg = AppConfig::default();
+        cfg.log_level = LogLevel::Debug;
+        let raw = serde_json::to_string(&cfg).expect("ser");
+        let back: AppConfig = serde_json::from_str(&raw).expect("de");
+        assert_eq!(back.log_level, LogLevel::Debug);
+        assert!(raw.contains("\"logLevel\":\"debug\""));
     }
 
     #[test]

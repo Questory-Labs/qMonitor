@@ -12,6 +12,7 @@ use crate::auth;
 use crate::db::SessionRow;
 use crate::detect::{foreground_pid, primary_identity, snapshot_processes};
 use crate::health::RuntimeHealth;
+use crate::identity::steam_path;
 use crate::identity::ProcessSnapshot;
 use crate::live_session::DetectSample;
 use crate::persist::{self, PersistCmd};
@@ -21,6 +22,7 @@ use crate::session::AppState;
 const DETECT_BLOCKING_TIMEOUT: Duration = Duration::from_secs(3);
 const PUSH_POLL: Duration = Duration::from_secs(2);
 const HEALTH_PULSE: Duration = Duration::from_secs(3);
+const STEAM_RELOAD_THROTTLE: Duration = Duration::from_secs(30);
 
 pub fn spawn_workers(app: tauri::AppHandle, state: Arc<AppState>, tray: tauri::tray::TrayIcon) {
     let (sample_tx, sample_rx) = watch::channel(DetectSample::empty());
@@ -58,6 +60,7 @@ async fn run_detect(state: Arc<AppState>, sample_tx: watch::Sender<DetectSample>
     let mut prev_processes: Vec<ProcessSnapshot> = Vec::new();
     let mut prev_fg: Option<u32> = None;
     let mut in_flight: Option<JoinHandle<(Vec<ProcessSnapshot>, Option<u32>)>> = None;
+    let mut last_steam_reload = tokio::time::Instant::now();
     loop {
         let interval = state.config.read().await.poll_interval_secs.max(1);
         if in_flight.is_none() {
@@ -92,6 +95,17 @@ async fn run_detect(state: Arc<AppState>, sample_tx: watch::Sender<DetectSample>
                 (prev_processes.clone(), prev_fg)
             }
         };
+
+        let unindexed = {
+            let pipe = state.pipeline.read().await;
+            processes
+                .iter()
+                .any(|p| steam_path::is_unindexed_steamapps_process(p, &pipe.steam))
+        };
+        if unindexed && last_steam_reload.elapsed() >= STEAM_RELOAD_THROTTLE {
+            state.refresh_steam_library().await;
+            last_steam_reload = tokio::time::Instant::now();
+        }
 
         let (identities, pending) = {
             let pipe = state.pipeline.read().await;

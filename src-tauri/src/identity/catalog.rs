@@ -41,11 +41,7 @@ impl LocalCatalog {
     pub fn match_process(&self, proc: &ProcessSnapshot) -> Option<GameIdentity> {
         let os = current_os_label();
         let pname = proc.name.to_ascii_lowercase();
-        let path_l = proc
-            .exe_path
-            .as_deref()
-            .unwrap_or("")
-            .to_ascii_lowercase();
+        let path_l = proc.exe_path.as_deref().unwrap_or("").to_ascii_lowercase();
         let cmd = proc.cmdline.as_deref().unwrap_or("").to_ascii_lowercase();
 
         let mut best: Option<(Confidence, &CatalogEntry)> = None;

@@ -78,7 +78,9 @@ impl Default for WebhookClient {
 
 impl WebhookClient {
     pub fn new() -> Self {
-        Self { http: http_client() }
+        Self {
+            http: http_client(),
+        }
     }
 
     pub async fn push(

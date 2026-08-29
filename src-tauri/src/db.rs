@@ -653,7 +653,10 @@ mod tests {
         let path = dir.path().join("test.db");
         let db = TursoDb::open(&path).await.expect("open");
         db.ping().await.expect("ping");
-        let row = db.open_session_at(&sample_identity(), Utc::now()).await.unwrap();
+        let row = db
+            .open_session_at(&sample_identity(), Utc::now())
+            .await
+            .unwrap();
         assert_eq!(row.push_status, PushStatus::Active);
         let ended = db.end_session_at(&row.id, Utc::now()).await.unwrap();
         assert_eq!(ended.push_status, PushStatus::Pending);
@@ -678,8 +681,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("dup.db");
         let db = TursoDb::open(&path).await.expect("open");
-        let a = db.open_session_at(&sample_identity(), Utc::now()).await.unwrap();
-        let b = db.open_session_at(&sample_identity(), Utc::now()).await.unwrap();
+        let a = db
+            .open_session_at(&sample_identity(), Utc::now())
+            .await
+            .unwrap();
+        let b = db
+            .open_session_at(&sample_identity(), Utc::now())
+            .await
+            .unwrap();
         assert_eq!(a.id, b.id);
         assert_eq!(db.list_active().await.unwrap().len(), 1);
     }
@@ -689,7 +698,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("discard.db");
         let db = TursoDb::open(&path).await.expect("open");
-        let row = db.open_session_at(&sample_identity(), Utc::now()).await.unwrap();
+        let row = db
+            .open_session_at(&sample_identity(), Utc::now())
+            .await
+            .unwrap();
         db.discard_session(&row.id).await.unwrap();
         assert!(db.list_active().await.unwrap().is_empty());
         assert!(db.list_due_pushes().await.unwrap().is_empty());

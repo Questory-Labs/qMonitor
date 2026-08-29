@@ -4,6 +4,7 @@ pub mod detectable;
 pub mod fingerprint;
 pub mod resolver;
 pub mod steam_library;
+pub mod steam_path;
 
 #[cfg(test)]
 pub mod fixtures;

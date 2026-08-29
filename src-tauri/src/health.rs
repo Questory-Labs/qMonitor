@@ -75,16 +75,12 @@ pub fn init_tracing() {
     FILE_ON.store(level.file_enabled(), Ordering::Relaxed);
     prune_now(level);
 
-    let (filter, reload_handle) =
-        reload::Layer::new(EnvFilter::new(level.env_filter()));
+    let (filter, reload_handle) = reload::Layer::new(EnvFilter::new(level.env_filter()));
     let _ = FILTER_RELOAD.set(reload_handle);
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr.and(GatedMakeWriter)),
-        )
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr.and(GatedMakeWriter)))
         .init();
 
     if level.file_enabled() {
@@ -369,9 +365,9 @@ mod tests {
         }
         let _reset = ResetSink;
 
-        let active = dir.path().join(
-            active_daily_log_name().expect("sink is active"),
-        );
+        let active = dir
+            .path()
+            .join(active_daily_log_name().expect("sink is active"));
         fs::write(&active, vec![b'x'; LOG_MAX_BYTES as usize + 64]).unwrap();
         let other = dir.path().join("qmonitor.log.2020-01-01");
         fs::write(&other, vec![b'y'; 200]).unwrap();

@@ -66,6 +66,9 @@ pub fn is_denied(process_name: &str) -> bool {
         || stem.contains("crashhandler")
         || stem.contains("crashreporter")
         || stem.contains("webview")
+        || stem.contains("subprocess")
+        || stem.contains("unrealcef")
+        || stem.contains("crashpad")
         || stem.starts_with("qtwebengine")
         || name.contains("easyanticheat")
         || name.contains("battleye")
@@ -83,6 +86,7 @@ mod tests {
         assert!(is_denied("UnityCrashHandler64.exe"));
         assert!(!is_denied("dota2.exe"));
         assert!(!is_denied("Hades.exe"));
+        assert!(!is_denied("Caffeine.exe"));
     }
 
     #[test]
@@ -91,5 +95,7 @@ mod tests {
         assert!(is_denied("QtWebEngineProcess.exe"));
         assert!(is_denied("obs-browser-page.exe"));
         assert!(is_denied("NVIDIA Broadcast.exe"));
+        assert!(is_denied("UnrealCEFSubProcess.exe"));
+        assert!(!is_denied("Caffeine.exe"));
     }
 }

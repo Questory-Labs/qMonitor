@@ -11,9 +11,9 @@ use tokio::time::timeout;
 
 use crate::db::{SessionRow, TursoDb};
 use crate::identity::{GameIdentity, ManualGame};
-use crate::live_session::{DetectSample, PendingEnd, SLEEP_SPLIT};
 #[cfg(test)]
 use crate::live_session::LiveSession;
+use crate::live_session::{DetectSample, PendingEnd, SLEEP_SPLIT};
 use crate::session::AppState;
 
 pub const DB_OP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -113,9 +113,7 @@ async fn write_pending_end(db: &TursoDb, end: &PendingEnd) -> Result<(), String>
         found = true;
     }
     if !found {
-        let opened = db
-            .open_session_at(&end.identity, end.started_at)
-            .await?;
+        let opened = db.open_session_at(&end.identity, end.started_at).await?;
         db.end_session_at(&opened.id, end.ended_at).await?;
     }
     Ok(())
@@ -436,10 +434,7 @@ async fn handle_cmd(
             }
             load_prefs(db, state).await.ok();
         }
-        PersistCmd::Unignore {
-            identity_id,
-            reply,
-        } => {
+        PersistCmd::Unignore { identity_id, reply } => {
             let res = timed(db.remove_ignored(&identity_id)).await;
             let out = persist_reply(&res);
             let _ = reply.send(out);

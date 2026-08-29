@@ -3,14 +3,11 @@
 pub mod linux;
 pub mod windows;
 
-use crate::identity::{GameIdentity, ProcessSnapshot};
 use crate::identity::steam_library::SteamLibraryIndex;
+use crate::identity::{GameIdentity, ProcessSnapshot};
 
 /// Dispatch to the host OS detector.
-pub fn detect_steam(
-    processes: &[ProcessSnapshot],
-    steam: &SteamLibraryIndex,
-) -> Vec<GameIdentity> {
+pub fn detect_steam(processes: &[ProcessSnapshot], steam: &SteamLibraryIndex) -> Vec<GameIdentity> {
     #[cfg(target_os = "windows")]
     {
         windows::detect_steam(processes, steam)

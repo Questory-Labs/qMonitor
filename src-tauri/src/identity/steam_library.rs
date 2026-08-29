@@ -19,16 +19,21 @@ pub struct SteamLibraryIndex {
 }
 
 impl SteamLibraryIndex {
-    pub fn load(steam_root: Option<&Path>) -> Self {
+    pub fn load(steam_root: Option<&Path>) -> Result<Self, String> {
         let Some(root) = steam_root.map(PathBuf::from).or_else(detect_steam_root) else {
-            return Self::default();
+            return Ok(Self::default());
         };
+        if !root.exists() {
+            return Err(format!("steam root not found: {}", root.display()));
+        }
         let mut games = HashMap::new();
+        let mut steamapps_ok = 0u32;
         for lib in library_folders(&root) {
             let steamapps = lib.join("steamapps");
             let Ok(entries) = fs::read_dir(&steamapps) else {
                 continue;
             };
+            steamapps_ok += 1;
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if !name.starts_with("appmanifest_") || !name.ends_with(".acf") {
@@ -39,7 +44,10 @@ impl SteamLibraryIndex {
                 }
             }
         }
-        Self { games }
+        if steamapps_ok == 0 {
+            return Err(format!("steamapps unreadable under {}", root.display()));
+        }
+        Ok(Self { games })
     }
 
     pub fn resolve_app_id(&self, app_id: u32) -> Option<GameIdentity> {
@@ -186,10 +194,7 @@ pub fn parse_reaper_app_ids(cmdline: &str) -> Vec<u32> {
     let mut search = cmdline;
     while let Some(idx) = search.find(marker) {
         let after = &search[idx + marker.len()..];
-        let id_str: String = after
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
+        let id_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
         if let Ok(id) = id_str.parse::<u32>() {
             // Boundary: next char must be non-digit (space/end) — already ensured by take_while.
             // Avoid substring: "440" matching inside "4400" — take_while gets full number so 4400 is fine as distinct.
@@ -216,12 +221,31 @@ pub fn cmdline_has_app_id(cmdline: &str, app_id: u32) -> bool {
 }
 
 #[cfg(test)]
+pub(crate) fn write_test_library(
+    root: &Path,
+    app_id: u32,
+    title: &str,
+    installdir: &str,
+) -> std::io::Result<()> {
+    let steamapps = root.join("steamapps");
+    fs::create_dir_all(steamapps.join("common").join(installdir))?;
+    let body = format!(
+        "\"AppState\"\n{{\n\t\"appid\"\t\t\"{app_id}\"\n\t\"name\"\t\t\"{title}\"\n\t\"installdir\"\t\t\"{installdir}\"\n}}\n"
+    );
+    fs::write(steamapps.join(format!("appmanifest_{app_id}.acf")), body)?;
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn reaper_app_id_boundary() {
-        assert!(cmdline_has_app_id("reaper SteamLaunch AppId=440 -- game", 440));
+        assert!(cmdline_has_app_id(
+            "reaper SteamLaunch AppId=440 -- game",
+            440
+        ));
         assert!(!cmdline_has_app_id(
             "reaper SteamLaunch AppId=4400 -- game",
             440
@@ -250,7 +274,9 @@ mod tests {
         let proc = ProcessSnapshot {
             pid: 1,
             name: "dota2.exe".into(),
-            exe_path: Some(r"D:\Steam\steamapps\common\dota 2 beta\game\bin\win64\dota2.exe".into()),
+            exe_path: Some(
+                r"D:\Steam\steamapps\common\dota 2 beta\game\bin\win64\dota2.exe".into(),
+            ),
             cmdline: None,
         };
         let id = index.match_path(&proc).unwrap();
@@ -262,8 +288,7 @@ mod tests {
     #[test]
     fn path_boundary_portal_vs_portal_2() {
         let portal = PathBuf::from(r"D:\Steam\steamapps\common\Portal");
-        let portal2_exe =
-            r"D:\Steam\steamapps\common\Portal 2\bin\portal2.exe";
+        let portal2_exe = r"D:\Steam\steamapps\common\Portal 2\bin\portal2.exe";
         assert!(!path_is_under_install(portal2_exe, &portal));
         assert!(path_is_under_install(
             r"D:\Steam\steamapps\common\Portal\portal.exe",
@@ -297,5 +322,31 @@ mod tests {
             cmdline: None,
         };
         assert!(index.match_path(&proc).is_none());
+    }
+
+    #[test]
+    fn load_missing_root_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-steam");
+        assert!(SteamLibraryIndex::load(Some(&missing)).is_err());
+    }
+
+    #[test]
+    fn load_readable_empty_steamapps_is_ok_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("steamapps")).unwrap();
+        let index = SteamLibraryIndex::load(Some(dir.path())).unwrap();
+        assert!(index.games.is_empty());
+    }
+
+    #[test]
+    fn load_parses_appmanifest() {
+        let dir = tempfile::tempdir().unwrap();
+        write_test_library(dir.path(), 570, "Dota 2", "dota 2 beta").unwrap();
+        let index = SteamLibraryIndex::load(Some(dir.path())).unwrap();
+        assert_eq!(
+            index.games.get(&570).map(|g| g.title.as_str()),
+            Some("Dota 2")
+        );
     }
 }

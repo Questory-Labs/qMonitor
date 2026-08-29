@@ -26,10 +26,7 @@ pub fn is_proton_wrapper(process_name: &str) -> bool {
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub fn detect_steam(
-    processes: &[ProcessSnapshot],
-    steam: &SteamLibraryIndex,
-) -> Vec<GameIdentity> {
+pub fn detect_steam(processes: &[ProcessSnapshot], steam: &SteamLibraryIndex) -> Vec<GameIdentity> {
     let mut identities = steamlaunch_identities(processes, steam);
     for proc in processes {
         if is_denied(&proc.name) || is_proton_wrapper(&proc.name) {
@@ -87,7 +84,9 @@ mod tests {
             SteamGame {
                 app_id: 730,
                 title: "CS2".into(),
-                install_path: PathBuf::from("/games/steamapps/common/Counter-Strike Global Offensive"),
+                install_path: PathBuf::from(
+                    "/games/steamapps/common/Counter-Strike Global Offensive",
+                ),
             },
         );
         let procs = vec![ProcessSnapshot {
@@ -118,7 +117,9 @@ mod tests {
         let procs = vec![ProcessSnapshot {
             pid: 1,
             name: "dota2".into(),
-            exe_path: Some("/games/steamapps/common/dota 2 beta/game/bin/linuxsteamrt64/dota2".into()),
+            exe_path: Some(
+                "/games/steamapps/common/dota 2 beta/game/bin/linuxsteamrt64/dota2".into(),
+            ),
             cmdline: None,
         }];
         let ids = detect_steam(&procs, &dota_index());

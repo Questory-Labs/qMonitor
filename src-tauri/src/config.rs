@@ -11,8 +11,7 @@ pub const OAUTH_REVOKE_PATH: &str = "/oauth/qmonitor/revoke";
 pub const KEYRING_SERVICE: &str = "qmonitor";
 pub const KEYRING_ACCESS: &str = "access_token";
 pub const KEYRING_SESSION: &str = "session_token";
-pub const DEFAULT_DETECTABLE_URL: &str =
-    "https://discord.com/api/v10/applications/detectable";
+pub const DEFAULT_DETECTABLE_URL: &str = "https://discord.com/api/v10/applications/detectable";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

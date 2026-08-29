@@ -50,9 +50,7 @@ impl LiveSession {
     /// Apply a detect sample. Never waits on I/O.
     pub fn apply(&mut self, sample: &DetectSample) {
         let now = sample.observed_at;
-        let gap = self
-            .last_tick_at
-            .map(|t| now.signed_duration_since(t));
+        let gap = self.last_tick_at.map(|t| now.signed_duration_since(t));
         self.last_tick_at = Some(now);
 
         if gap.is_some_and(|g| g > SLEEP_SPLIT) && self.identity.is_some() {
@@ -61,7 +59,11 @@ impl LiveSession {
 
         match &sample.primary {
             Some(primary) => {
-                if self.identity.as_ref().is_some_and(|cur| cur.id == primary.id) {
+                if self
+                    .identity
+                    .as_ref()
+                    .is_some_and(|cur| cur.id == primary.id)
+                {
                     self.last_seen_at = Some(now);
                     self.identity = Some(primary.clone());
                 } else {
@@ -196,7 +198,10 @@ mod tests {
         let mut live = LiveSession::default();
         let t0 = Utc::now();
         live.apply(&sample_at(t0, Some(game("steam:1", "A"))));
-        live.apply(&sample_at(t0 + Duration::seconds(3), Some(game("steam:2", "B"))));
+        live.apply(&sample_at(
+            t0 + Duration::seconds(3),
+            Some(game("steam:2", "B")),
+        ));
         assert_eq!(live.pending_ends.len(), 1);
         assert_eq!(live.pending_ends[0].identity.id, "steam:1");
         assert_eq!(live.identity_id(), Some("steam:2"));

@@ -6,9 +6,7 @@ use keyring::Entry;
 use serde::Deserialize;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::config::{
-    AppConfig, DetectedService, KEYRING_ACCESS, KEYRING_SERVICE, KEYRING_SESSION,
-};
+use crate::config::{AppConfig, DetectedService, KEYRING_ACCESS, KEYRING_SERVICE, KEYRING_SESSION};
 use crate::device;
 use crate::oauth_loopback::REDIRECT_URI;
 use crate::pkce;
@@ -195,10 +193,7 @@ pub async fn detect_and_apply(cfg: &mut AppConfig) -> Result<String, String> {
     if !res.status().is_success() {
         return Err(format!("health HTTP {}", res.status()));
     }
-    let body: HealthBody = res
-        .json()
-        .await
-        .map_err(|e| format!("health JSON: {e}"))?;
+    let body: HealthBody = res.json().await.map_err(|e| format!("health JSON: {e}"))?;
     if !body.ok {
         return Err("health ok=false".into());
     }
@@ -349,10 +344,8 @@ mod tests {
 
     #[test]
     fn parses_code_callback() {
-        let (c, s) = parse_callback_code(
-            "http://127.0.0.1:58473/callback?code=abc&state=xyz",
-        )
-        .unwrap();
+        let (c, s) =
+            parse_callback_code("http://127.0.0.1:58473/callback?code=abc&state=xyz").unwrap();
         assert_eq!(c, "abc");
         assert_eq!(s, "xyz");
     }

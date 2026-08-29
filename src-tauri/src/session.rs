@@ -15,6 +15,7 @@ use crate::db::{PushStatus, SessionRow, TursoDb};
 use crate::health::RuntimeHealth;
 use crate::identity::detectable::{self, DetectableCatalog, DETECTABLE_MAX_AGE};
 use crate::identity::resolver::{parse_exe_input, IdentityPipeline, UserMapping};
+use crate::identity::steam_library::SteamLibraryIndex;
 use crate::identity::{ManualGame, PendingDetection, TrackableGame};
 use crate::live_session::LiveSession;
 use crate::persist::{DbView, PersistCmd};
@@ -59,27 +60,17 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         let config = AppConfig::load();
-        let steam = config
-            .steam_path_override
-            .as_ref()
-            .map(PathBuf::from);
-        let catalog = config
-            .catalog_path
-            .as_ref()
-            .map(PathBuf::from)
-            .or_else(|| {
-                let p = PathBuf::from("catalogs/games.example.json");
-                if p.exists() {
-                    Some(p)
-                } else {
-                    None
-                }
-            });
-        let pipeline = IdentityPipeline::new(
-            steam.as_deref(),
-            catalog.as_deref(),
-            Default::default(),
-        );
+        let steam = config.steam_path_override.as_ref().map(PathBuf::from);
+        let catalog = config.catalog_path.as_ref().map(PathBuf::from).or_else(|| {
+            let p = PathBuf::from("catalogs/games.example.json");
+            if p.exists() {
+                Some(p)
+            } else {
+                None
+            }
+        });
+        let pipeline =
+            IdentityPipeline::new(steam.as_deref(), catalog.as_deref(), Default::default());
         Self {
             config: RwLock::new(config),
             db: RwLock::new(None),
@@ -129,7 +120,13 @@ impl AppState {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(), String>>,
     {
-        if self.persist_tx.lock().ok().and_then(|g| g.clone()).is_some() {
+        if self
+            .persist_tx
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .is_some()
+        {
             drop(fallback);
             self.call_persist(make).await
         } else {
@@ -184,6 +181,24 @@ impl AppState {
         self.pipeline.write().await.detectable = catalog;
     }
 
+    /// Reload the local Steam library index (new installs, renamed titles).
+    pub async fn refresh_steam_library(&self) {
+        let steam = self.config.read().await.steam_path_override.clone();
+        let path = steam.map(PathBuf::from);
+        let index =
+            match tokio::task::spawn_blocking(move || SteamLibraryIndex::load(path.as_deref()))
+                .await
+            {
+                Ok(index) => index,
+                Err(e) => {
+                    tracing::warn!(%e, "steam library reload join failed");
+                    return;
+                }
+            };
+        tracing::info!(games = index.games.len(), "steam library index ready");
+        self.pipeline.write().await.steam = index;
+    }
+
     pub async fn home_state(&self) -> HomeState {
         let cfg = self.config.read().await.clone();
         let poll = cfg.poll_interval_secs.max(1);
@@ -215,7 +230,11 @@ impl AppState {
         }
     }
 
-    pub async fn confirm_detection(&self, fingerprint: String, title: String) -> Result<(), String> {
+    pub async fn confirm_detection(
+        &self,
+        fingerprint: String,
+        title: String,
+    ) -> Result<(), String> {
         let identity_id = format!("user:{fingerprint}");
         let mapping = UserMapping {
             fingerprint: fingerprint.clone(),
@@ -391,7 +410,6 @@ fn overlay_active(live: &LiveSession, db_active: Option<SessionRow>) -> Option<S
     })
 }
 
-
 pub async fn list_trackable_games(state: &AppState) -> Vec<TrackableGame> {
     let ignored_titles = state.ignored_titles.read().await.clone();
 
@@ -541,7 +559,10 @@ mod tests {
         };
         state.live.write().await.apply(&sample);
         let home = state.home_state().await;
-        assert_eq!(home.active.as_ref().map(|a| a.identity_id.as_str()), Some("steam:1"));
+        assert_eq!(
+            home.active.as_ref().map(|a| a.identity_id.as_str()),
+            Some("steam:1")
+        );
         assert!(!home.sync.turso_ok);
         state.live.write().await.apply(&DetectSample {
             observed_at: t0 + Duration::seconds(9),

@@ -210,11 +210,7 @@ fn normalize_path(s: &str) -> String {
 }
 
 fn pattern_basename(pattern: &str) -> String {
-    pattern
-        .rsplit('/')
-        .next()
-        .unwrap_or(pattern)
-        .to_string()
+    pattern.rsplit('/').next().unwrap_or(pattern).to_string()
 }
 
 fn current_discord_os() -> &'static str {

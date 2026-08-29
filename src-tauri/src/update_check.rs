@@ -52,10 +52,7 @@ pub fn installed_version() -> &'static str {
     APP_VERSION
 }
 
-pub async fn check(
-    channel: UpdateChannel,
-    force: bool,
-) -> Result<Option<PendingUpdate>, String> {
+pub async fn check(channel: UpdateChannel, force: bool) -> Result<Option<PendingUpdate>, String> {
     check_at(
         channel,
         force,
@@ -152,7 +149,12 @@ fn now_unix_secs() -> u64 {
         .as_secs()
 }
 
-fn should_skip_network(cache: &UpdateCheckCache, channel: UpdateChannel, force: bool, now: u64) -> bool {
+fn should_skip_network(
+    cache: &UpdateCheckCache,
+    channel: UpdateChannel,
+    force: bool,
+    now: u64,
+) -> bool {
     if force {
         return false;
     }
@@ -417,17 +419,10 @@ mod tests {
             html_url: format!("https://github.com{RELEASES_PATH}/tag/v0.0.2"),
         };
 
-        let first = check_at(
-            UpdateChannel::Stable,
-            false,
-            "0.0.1",
-            &path,
-            1_000,
-            |_ch| {
-                let p = pending.clone();
-                async move { Ok(Some(p)) }
-            },
-        )
+        let first = check_at(UpdateChannel::Stable, false, "0.0.1", &path, 1_000, |_ch| {
+            let p = pending.clone();
+            async move { Ok(Some(p)) }
+        })
         .await
         .unwrap();
         assert_eq!(first.as_ref().map(|p| p.tag.as_str()), Some("v0.0.2"));

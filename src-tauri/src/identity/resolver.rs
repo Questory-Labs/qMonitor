@@ -12,6 +12,7 @@ use super::deny::is_denied;
 use super::detectable::DetectableCatalog;
 use super::fingerprint::fingerprint_process;
 use super::steam_library::SteamLibraryIndex;
+use super::steam_path;
 use super::{Confidence, GameIdentity, ManualGame, PendingDetection, ProcessSnapshot};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +144,8 @@ impl IdentityPipeline {
                 }
             }
         }
+
+        steam_path::finalize_steam_path_hits(&self.steam, &mut identities, &mut pending, processes);
 
         identities.retain(|i| {
             i.confidence.allows_auto_track() && !self.ignored_identities.contains(&i.id)
@@ -425,8 +428,7 @@ mod tests {
 
     #[test]
     fn manual_game_matches_path() {
-        let (exe_name, path_hint) =
-            parse_exe_input(r"D:\Games\Hades\Hades.exe").unwrap();
+        let (exe_name, path_hint) = parse_exe_input(r"D:\Games\Hades\Hades.exe").unwrap();
         assert_eq!(exe_name, "Hades.exe");
         assert_eq!(path_hint.as_deref(), Some("Hades"));
 

@@ -186,10 +186,7 @@ pub fn parse_reaper_app_ids(cmdline: &str) -> Vec<u32> {
     let mut search = cmdline;
     while let Some(idx) = search.find(marker) {
         let after = &search[idx + marker.len()..];
-        let id_str: String = after
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
+        let id_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
         if let Ok(id) = id_str.parse::<u32>() {
             // Boundary: next char must be non-digit (space/end) — already ensured by take_while.
             // Avoid substring: "440" matching inside "4400" — take_while gets full number so 4400 is fine as distinct.
@@ -221,7 +218,10 @@ mod tests {
 
     #[test]
     fn reaper_app_id_boundary() {
-        assert!(cmdline_has_app_id("reaper SteamLaunch AppId=440 -- game", 440));
+        assert!(cmdline_has_app_id(
+            "reaper SteamLaunch AppId=440 -- game",
+            440
+        ));
         assert!(!cmdline_has_app_id(
             "reaper SteamLaunch AppId=4400 -- game",
             440
@@ -250,7 +250,9 @@ mod tests {
         let proc = ProcessSnapshot {
             pid: 1,
             name: "dota2.exe".into(),
-            exe_path: Some(r"D:\Steam\steamapps\common\dota 2 beta\game\bin\win64\dota2.exe".into()),
+            exe_path: Some(
+                r"D:\Steam\steamapps\common\dota 2 beta\game\bin\win64\dota2.exe".into(),
+            ),
             cmdline: None,
         };
         let id = index.match_path(&proc).unwrap();
@@ -262,8 +264,7 @@ mod tests {
     #[test]
     fn path_boundary_portal_vs_portal_2() {
         let portal = PathBuf::from(r"D:\Steam\steamapps\common\Portal");
-        let portal2_exe =
-            r"D:\Steam\steamapps\common\Portal 2\bin\portal2.exe";
+        let portal2_exe = r"D:\Steam\steamapps\common\Portal 2\bin\portal2.exe";
         assert!(!path_is_under_install(portal2_exe, &portal));
         assert!(path_is_under_install(
             r"D:\Steam\steamapps\common\Portal\portal.exe",

@@ -52,15 +52,20 @@ impl IdentityPipeline {
         steam_override: Option<&Path>,
         catalog_path: Option<&Path>,
         user_mappings: HashMap<String, UserMapping>,
+        steam_fallback: Option<SteamLibraryIndex>,
     ) -> Self {
         let catalog = catalog_path
             .map(LocalCatalog::load_from_path)
             .unwrap_or_default();
-        Self {
-            steam: SteamLibraryIndex::load(steam_override).unwrap_or_else(|e| {
+        let steam = match SteamLibraryIndex::load(steam_override) {
+            Ok(index) => index,
+            Err(e) => {
                 tracing::warn!(%e, "steam library load failed");
-                SteamLibraryIndex::default()
-            }),
+                steam_fallback.unwrap_or_default()
+            }
+        };
+        Self {
+            steam,
             catalog,
             detectable: DetectableCatalog::load_from_disk(),
             user_mappings,
@@ -469,5 +474,37 @@ mod tests {
         let (name, hint) = parse_exe_input("/opt/games/Hades/Hades.exe").unwrap();
         assert_eq!(name, "Hades.exe");
         assert_eq!(hint.as_deref(), Some("Hades"));
+    }
+
+    fn prior_dota() -> SteamLibraryIndex {
+        let mut steam = SteamLibraryIndex::default();
+        steam.games.insert(
+            570,
+            super::super::steam_library::SteamGame {
+                app_id: 570,
+                title: "Dota 2".into(),
+                install_path: std::path::PathBuf::from("/games/dota"),
+            },
+        );
+        steam
+    }
+
+    #[test]
+    fn new_preserves_fallback_steam_when_load_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing-steam");
+        let pipe = IdentityPipeline::new(Some(&missing), None, HashMap::new(), Some(prior_dota()));
+        assert_eq!(
+            pipe.steam.games.get(&570).map(|g| g.title.as_str()),
+            Some("Dota 2")
+        );
+    }
+
+    #[test]
+    fn new_defaults_steam_when_load_fails_without_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing-steam");
+        let pipe = IdentityPipeline::new(Some(&missing), None, HashMap::new(), None);
+        assert!(pipe.steam.games.is_empty());
     }
 }

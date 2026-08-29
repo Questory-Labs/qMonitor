@@ -72,8 +72,12 @@ impl AppState {
                 None
             }
         });
-        let pipeline =
-            IdentityPipeline::new(steam.as_deref(), catalog.as_deref(), Default::default());
+        let pipeline = IdentityPipeline::new(
+            steam.as_deref(),
+            catalog.as_deref(),
+            Default::default(),
+            None,
+        );
         Self {
             config: RwLock::new(config),
             db: RwLock::new(None),
@@ -143,12 +147,13 @@ impl AppState {
         let cfg = self.config.read().await.clone();
         let steam = cfg.steam_path_override.as_ref().map(PathBuf::from);
         let catalog = cfg.catalog_path.as_ref().map(PathBuf::from);
-        let (mappings, ignored, manuals) = {
+        let (mappings, ignored, manuals, steam_fallback) = {
             let pipe = self.pipeline.read().await;
             (
                 pipe.user_mappings.clone(),
                 pipe.ignored_identities.clone(),
                 pipe.manual_games.clone(),
+                pipe.steam.clone(),
             )
         };
         let detectable = {
@@ -159,7 +164,12 @@ impl AppState {
                 pipe.detectable.clone()
             }
         };
-        let mut pipe = IdentityPipeline::new(steam.as_deref(), catalog.as_deref(), mappings);
+        let mut pipe = IdentityPipeline::new(
+            steam.as_deref(),
+            catalog.as_deref(),
+            mappings,
+            Some(steam_fallback),
+        );
         pipe.detectable = detectable;
         pipe.ignored_identities = ignored;
         pipe.manual_games = manuals;
@@ -670,6 +680,23 @@ mod tests {
                 .into_owned(),
         );
         state.refresh_steam_library().await;
+        let steam = &state.pipeline.read().await.steam;
+        assert_eq!(steam.games.get(&1).map(|g| g.title.as_str()), Some("Old"));
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[tokio::test]
+    async fn reload_pipeline_preserves_steam_index_on_load_failure() {
+        let state = AppState::new();
+        seed_old_game(&state).await;
+        let dir = tempdir().unwrap();
+        state.config.write().await.steam_path_override = Some(
+            dir.path()
+                .join("missing-steam")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        state.reload_pipeline().await;
         let steam = &state.pipeline.read().await.steam;
         assert_eq!(steam.games.get(&1).map(|g| g.title.as_str()), Some("Old"));
     }

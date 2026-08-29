@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -55,6 +56,8 @@ pub struct AppState {
     pub ignored_titles: RwLock<HashMap<String, String>>,
     pub pending_detections: RwLock<Vec<PendingDetection>>,
     pub last_error: RwLock<Option<String>>,
+    steam_lib_epoch: AtomicU64,
+    steam_lib_refresh: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -82,6 +85,8 @@ impl AppState {
             ignored_titles: RwLock::new(HashMap::new()),
             pending_detections: RwLock::new(Vec::new()),
             last_error: RwLock::new(None),
+            steam_lib_epoch: AtomicU64::new(0),
+            steam_lib_refresh: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -183,20 +188,30 @@ impl AppState {
 
     /// Reload the local Steam library index (new installs, renamed titles).
     pub async fn refresh_steam_library(&self) {
+        let _refresh = self.steam_lib_refresh.lock().await;
         let steam = self.config.read().await.steam_path_override.clone();
         let path = steam.map(PathBuf::from);
+        let gen = self.steam_lib_epoch.fetch_add(1, Ordering::AcqRel) + 1;
         let index =
             match tokio::task::spawn_blocking(move || SteamLibraryIndex::load(path.as_deref()))
                 .await
             {
-                Ok(index) => index,
+                Ok(Ok(index)) => index,
+                Ok(Err(e)) => {
+                    tracing::warn!(%e, "steam library reload failed");
+                    return;
+                }
                 Err(e) => {
                     tracing::warn!(%e, "steam library reload join failed");
                     return;
                 }
             };
-        tracing::info!(games = index.games.len(), "steam library index ready");
-        self.pipeline.write().await.steam = index;
+        let mut pipe = self.pipeline.write().await;
+        if !commit_steam_library(&self.steam_lib_epoch, gen, &mut pipe.steam, index) {
+            tracing::debug!(gen, "steam library reload superseded");
+            return;
+        }
+        tracing::info!(games = pipe.steam.games.len(), "steam library index ready");
     }
 
     pub async fn home_state(&self) -> HomeState {
@@ -379,6 +394,19 @@ impl AppState {
     }
 }
 
+fn commit_steam_library(
+    epoch: &AtomicU64,
+    gen: u64,
+    steam: &mut SteamLibraryIndex,
+    next: SteamLibraryIndex,
+) -> bool {
+    if epoch.load(Ordering::Acquire) != gen {
+        return false;
+    }
+    *steam = next;
+    true
+}
+
 fn overlay_active(live: &LiveSession, db_active: Option<SessionRow>) -> Option<SessionRow> {
     let Some(identity) = live.identity.as_ref() else {
         return db_active;
@@ -495,10 +523,12 @@ pub async fn list_trackable_games(state: &AppState) -> Vec<TrackableGame> {
 mod tests {
     use super::*;
     use crate::db::TursoDb;
+    use crate::identity::steam_library::{write_test_library, SteamGame};
     use crate::identity::{Confidence, GameIdentity};
     use crate::live_session::{DetectSample, LiveSession};
     use crate::persist::flush_live;
     use chrono::{Duration, Utc};
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     fn identity(id: &str, title: &str) -> GameIdentity {
@@ -596,5 +626,97 @@ mod tests {
         let actives = db.list_active().await.unwrap();
         assert_eq!(actives.len(), 1);
         assert_eq!(actives[0].identity_id, "steam:1172470");
+    }
+
+    async fn seed_old_game(state: &AppState) {
+        state.pipeline.write().await.steam.games.insert(
+            1,
+            SteamGame {
+                app_id: 1,
+                title: "Old".into(),
+                install_path: PathBuf::from("/old"),
+            },
+        );
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[tokio::test]
+    async fn refresh_steam_library_replaces_index_on_success() {
+        let state = AppState::new();
+        seed_old_game(&state).await;
+        let dir = tempdir().unwrap();
+        write_test_library(dir.path(), 570, "Dota 2", "dota 2 beta").unwrap();
+        state.config.write().await.steam_path_override =
+            Some(dir.path().to_string_lossy().into_owned());
+        state.refresh_steam_library().await;
+        let steam = &state.pipeline.read().await.steam;
+        assert!(steam.games.get(&1).is_none());
+        assert_eq!(
+            steam.games.get(&570).map(|g| g.title.as_str()),
+            Some("Dota 2")
+        );
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[tokio::test]
+    async fn refresh_steam_library_preserves_index_on_load_failure() {
+        let state = AppState::new();
+        seed_old_game(&state).await;
+        let dir = tempdir().unwrap();
+        state.config.write().await.steam_path_override = Some(
+            dir.path()
+                .join("missing-steam")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        state.refresh_steam_library().await;
+        let steam = &state.pipeline.read().await.steam;
+        assert_eq!(steam.games.get(&1).map(|g| g.title.as_str()), Some("Old"));
+    }
+
+    #[test]
+    fn commit_steam_library_skips_superseded_generation() {
+        let epoch = AtomicU64::new(2);
+        let mut steam = SteamLibraryIndex::default();
+        steam.games.insert(
+            1,
+            SteamGame {
+                app_id: 1,
+                title: "Keep".into(),
+                install_path: PathBuf::from("/keep"),
+            },
+        );
+        let mut next = SteamLibraryIndex::default();
+        next.games.insert(
+            570,
+            SteamGame {
+                app_id: 570,
+                title: "Dota 2".into(),
+                install_path: PathBuf::from("/dota"),
+            },
+        );
+        assert!(!commit_steam_library(&epoch, 1, &mut steam, next));
+        assert_eq!(steam.games.get(&1).map(|g| g.title.as_str()), Some("Keep"));
+        assert!(steam.games.get(&570).is_none());
+    }
+
+    #[test]
+    fn commit_steam_library_applies_current_generation() {
+        let epoch = AtomicU64::new(3);
+        let mut steam = SteamLibraryIndex::default();
+        let mut next = SteamLibraryIndex::default();
+        next.games.insert(
+            570,
+            SteamGame {
+                app_id: 570,
+                title: "Dota 2".into(),
+                install_path: PathBuf::from("/dota"),
+            },
+        );
+        assert!(commit_steam_library(&epoch, 3, &mut steam, next));
+        assert_eq!(
+            steam.games.get(&570).map(|g| g.title.as_str()),
+            Some("Dota 2")
+        );
     }
 }

@@ -57,7 +57,10 @@ impl IdentityPipeline {
             .map(LocalCatalog::load_from_path)
             .unwrap_or_default();
         Self {
-            steam: SteamLibraryIndex::load(steam_override),
+            steam: SteamLibraryIndex::load(steam_override).unwrap_or_else(|e| {
+                tracing::warn!(%e, "steam library load failed");
+                SteamLibraryIndex::default()
+            }),
             catalog,
             detectable: DetectableCatalog::load_from_disk(),
             user_mappings,

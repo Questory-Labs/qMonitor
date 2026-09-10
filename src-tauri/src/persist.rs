@@ -316,6 +316,7 @@ async fn persist_loop(
                 handle_cmd(state, db, opened_path, cmd, push_tx).await?;
             }
             Some((id, result)) = push_result_rx.recv() => {
+                release_push(state, &id).await;
                 match result {
                     Ok(()) => timed(db.mark_synced(&id)).await?,
                     Err(e) => {
@@ -381,7 +382,7 @@ async fn apply_sample(
         }
     }
 
-    enqueue_due(db, push_tx).await?;
+    enqueue_due(state, db, push_tx).await?;
     refresh_and_store(state, db).await?;
     state.health.write().await.last_persist_at = Some(Utc::now());
     Ok(())
@@ -393,14 +394,42 @@ async fn snapshot_policy(state: &AppState) -> PushPolicy {
     PushPolicy::from_config(&cfg, &pipe)
 }
 
-async fn enqueue_due(db: &TursoDb, push_tx: &mpsc::Sender<SessionRow>) -> Result<(), PersistError> {
+struct EnqueueReport {
+    sent_ids: Vec<String>,
+    blocked: bool,
+}
+
+async fn claim_push(state: &AppState, id: &str) -> bool {
+    state.push_in_flight.write().await.insert(id.to_string())
+}
+
+async fn release_push(state: &AppState, id: &str) {
+    state.push_in_flight.write().await.remove(id);
+}
+
+async fn enqueue_due(
+    state: &AppState,
+    db: &TursoDb,
+    push_tx: &mpsc::Sender<SessionRow>,
+) -> Result<EnqueueReport, PersistError> {
     let due = timed(db.list_due_pushes()).await?;
+    let mut sent_ids = Vec::new();
+    let mut blocked = false;
     for row in due {
-        if push_tx.try_send(row).is_err() {
-            break;
+        let id = row.id.clone();
+        if !claim_push(state, &id).await {
+            continue;
+        }
+        match push_tx.try_send(row) {
+            Ok(()) => sent_ids.push(id),
+            Err(e) => {
+                release_push(state, &e.into_inner().id).await;
+                blocked = true;
+                break;
+            }
         }
     }
-    Ok(())
+    Ok(EnqueueReport { sent_ids, blocked })
 }
 
 async fn refresh_and_store(state: &AppState, db: &TursoDb) -> Result<(), PersistError> {
@@ -509,8 +538,29 @@ async fn handle_cmd(
         PersistCmd::ForcePush { session_id, reply } => {
             match timeout(DB_OP_TIMEOUT, db.mark_pending_now(&session_id)).await {
                 Ok(Ok(())) => {
-                    let _ = reply.send(Ok(()));
-                    enqueue_due(db, push_tx).await?;
+                    match enqueue_due(state, db, push_tx).await {
+                        Ok(report) => {
+                            let in_flight =
+                                state.push_in_flight.read().await.contains(&session_id);
+                            if report.sent_ids.iter().any(|id| id == &session_id)
+                                || in_flight
+                            {
+                                let _ = reply.send(persist_reply(&Ok(())));
+                            } else if report.blocked {
+                                let _ = reply.send(Err("push queue busy".into()));
+                            } else {
+                                let _ = reply.send(Err("session is not due".into()));
+                            }
+                        }
+                        Err(e) => {
+                            let out = persist_reply(&Err(match &e {
+                                PersistError::Poison(msg) => PersistError::Poison(msg.clone()),
+                                PersistError::PathChanged => PersistError::PathChanged,
+                            }));
+                            let _ = reply.send(out);
+                            return Err(e);
+                        }
+                    }
                 }
                 Ok(Err(e)) => {
                     let _ = reply.send(Err(e));
@@ -732,5 +782,59 @@ mod tests {
         let sent = push_rx.try_recv().expect("enqueued");
         assert_eq!(sent.identity_id, "discord:111");
         assert_eq!(sent.push_status, crate::db::PushStatus::Pending);
+    }
+
+    async fn pending_due_session(db: &TursoDb) -> crate::db::SessionRow {
+        let ident = identity("steam:570", "Dota");
+        let started = Utc::now() - ChronoDuration::hours(1);
+        let row = db.open_session_at(&ident, started).await.unwrap();
+        db.end_session_at(&row.id, Utc::now()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn enqueue_due_one_post_until_success_ack() {
+        let state = crate::session::AppState::new();
+        let dir = tempdir().unwrap();
+        let db = TursoDb::open(dir.path().join("once-ok.db")).await.unwrap();
+        let row = pending_due_session(&db).await;
+        let (push_tx, mut push_rx) = mpsc::channel(8);
+
+        let first = enqueue_due(&state, &db, &push_tx).await.unwrap();
+        assert_eq!(first.sent_ids, vec![row.id.clone()]);
+        let second = enqueue_due(&state, &db, &push_tx).await.unwrap();
+        assert!(second.sent_ids.is_empty());
+        assert_eq!(push_rx.try_recv().unwrap().id, row.id);
+        assert!(push_rx.try_recv().is_err());
+
+        release_push(&state, &row.id).await;
+        db.mark_synced(&row.id).await.unwrap();
+        let after = enqueue_due(&state, &db, &push_tx).await.unwrap();
+        assert!(after.sent_ids.is_empty());
+        assert!(push_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn enqueue_due_one_post_until_error_then_retry() {
+        let state = crate::session::AppState::new();
+        let dir = tempdir().unwrap();
+        let db = TursoDb::open(dir.path().join("once-err.db")).await.unwrap();
+        let row = pending_due_session(&db).await;
+        let (push_tx, mut push_rx) = mpsc::channel(8);
+
+        assert_eq!(
+            enqueue_due(&state, &db, &push_tx).await.unwrap().sent_ids,
+            vec![row.id.clone()]
+        );
+        assert!(enqueue_due(&state, &db, &push_tx)
+            .await
+            .unwrap()
+            .sent_ids
+            .is_empty());
+        assert_eq!(push_rx.try_recv().unwrap().id, row.id);
+
+        release_push(&state, &row.id).await;
+        let retry = enqueue_due(&state, &db, &push_tx).await.unwrap();
+        assert_eq!(retry.sent_ids, vec![row.id.clone()]);
+        assert_eq!(push_rx.try_recv().unwrap().id, row.id);
     }
 }

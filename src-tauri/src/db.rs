@@ -477,10 +477,8 @@ impl TursoDb {
         let n = self
             .conn
             .execute(
-                r#"DELETE FROM sessions WHERE
-                      (push_status='synced' AND acked_at IS NOT NULL AND acked_at < ?)
-                   OR (push_status='skipped' AND ended_at IS NOT NULL AND ended_at < ?)"#,
-                (cutoff.as_str(), cutoff.as_str()),
+                r#"DELETE FROM sessions WHERE push_status='synced' AND acked_at IS NOT NULL AND acked_at < ?"#,
+                (cutoff.as_str(),),
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -867,7 +865,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn purge_synced_also_drops_old_skipped() {
+    async fn purge_synced_leaves_old_skipped() {
         let dir = tempdir().unwrap();
         let db = TursoDb::open(dir.path().join("purge-skip.db"))
             .await
@@ -881,8 +879,9 @@ mod tests {
         db.end_session_with_policy(&row.id, started + Duration::seconds(10), &policy)
             .await
             .unwrap();
-        assert_eq!(db.purge_synced(30).await.unwrap(), 1);
-        assert!(db.get_session(&row.id).await.unwrap().is_none());
+        assert_eq!(db.purge_synced(30).await.unwrap(), 0);
+        let kept = db.get_session(&row.id).await.unwrap().unwrap();
+        assert_eq!(kept.push_status, PushStatus::Skipped);
     }
 
     #[tokio::test]

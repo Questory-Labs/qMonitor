@@ -1,6 +1,6 @@
 //! App state, pipeline prefs, and UI-facing home snapshot.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,6 +56,8 @@ pub struct AppState {
     pub ignored_titles: RwLock<HashMap<String, String>>,
     pub pending_detections: RwLock<Vec<PendingDetection>>,
     pub last_error: RwLock<Option<String>>,
+    /// Session IDs queued or POSTing; survives persist DB reconnects.
+    pub push_in_flight: RwLock<HashSet<String>>,
     steam_lib_epoch: AtomicU64,
     steam_lib_refresh: tokio::sync::Mutex<()>,
 }
@@ -89,6 +91,7 @@ impl AppState {
             ignored_titles: RwLock::new(HashMap::new()),
             pending_detections: RwLock::new(Vec::new()),
             last_error: RwLock::new(None),
+            push_in_flight: RwLock::new(HashSet::new()),
             steam_lib_epoch: AtomicU64::new(0),
             steam_lib_refresh: tokio::sync::Mutex::new(()),
         }

@@ -64,11 +64,15 @@ interface TrackableGame {
   trackingEnabled: boolean;
 }
 
-async function invokeTimeout<T>(cmd: string, ms = 4000): Promise<T> {
+async function invokeTimeout<T>(
+  cmd: string,
+  ms = 4000,
+  args?: Record<string, unknown>,
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      invoke<T>(cmd),
+      invoke<T>(cmd, args),
       new Promise<T>((_, reject) => {
         timer = setTimeout(() => reject(new Error(`${cmd} timed out`)), ms);
       }),
@@ -598,7 +602,7 @@ function App() {
                                   className="btn btn-secondary btn-sm"
                                   onClick={async () => {
                                     try {
-                                      await invoke("push_session", {
+                                      await invokeTimeout("push_session", 12000, {
                                         sessionId: s.id,
                                       });
                                       showToast(`Queued ${s.title}`);

@@ -323,7 +323,7 @@ export function Settings({
         <div className="setting-row">
           <div className="setting-row-text">
             <span className="setting-row-label">Retention</span>
-            <span className="setting-row-hint">Synced and skipped sessions</span>
+            <span className="setting-row-hint">Synced sessions</span>
           </div>
           <div className="setting-row-control">
             <select
@@ -334,7 +334,7 @@ export function Settings({
                   retentionAckedDays: Number(e.target.value),
                 })
               }
-              aria-label="Retention for synced and skipped sessions"
+              aria-label="Retention for synced sessions"
             >
               <option value={7}>7 days</option>
               <option value={30}>30 days</option>

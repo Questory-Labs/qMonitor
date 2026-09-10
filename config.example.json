@@ -6,6 +6,8 @@
   "dbPath": null,
   "pollIntervalSecs": 3,
   "retentionAckedDays": 30,
+  "minPushDurationMins": 0,
+  "pushFromListOnly": false,
   "catalogPath": "catalogs/games.example.json",
   "detectableUrl": null,
   "steamPathOverride": null,

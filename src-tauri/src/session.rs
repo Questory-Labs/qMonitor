@@ -402,6 +402,25 @@ impl AppState {
         .await?;
         Ok(game)
     }
+
+    pub async fn push_session(&self, session_id: String) -> Result<(), String> {
+        if session_id.starts_with("live:") {
+            return Err("cannot sync a live session".into());
+        }
+        self.persist_or_db(
+            |reply| PersistCmd::ForcePush {
+                session_id: session_id.clone(),
+                reply,
+            },
+            || async {
+                if let Some(db) = self.db.read().await.as_ref() {
+                    db.mark_pending_now(&session_id).await?;
+                }
+                Ok(())
+            },
+        )
+        .await
+    }
 }
 
 fn commit_steam_library(
@@ -587,6 +606,33 @@ mod tests {
             .await
             .ignored_identities
             .contains("steam:1172470"));
+    }
+
+    #[tokio::test]
+    async fn push_session_marks_skipped_pending() {
+        let state = AppState::new();
+        let dir = tempdir().unwrap();
+        let db = TursoDb::open(dir.path().join("force.db")).await.unwrap();
+        let started = Utc::now() - Duration::seconds(20);
+        let row = db
+            .open_session_at(&identity("steam:570", "Dota"), started)
+            .await
+            .unwrap();
+        let policy = crate::push_policy::PushPolicy {
+            min_duration_secs: 300,
+            allowlist: None,
+        };
+        db.end_session_with_policy(&row.id, Utc::now(), &policy)
+            .await
+            .unwrap();
+        *state.db.write().await = Some(std::sync::Arc::new(db));
+        state.push_session(row.id.clone()).await.unwrap();
+        let db = state.db.read().await.clone().unwrap();
+        let due = db.list_due_pushes().await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, row.id);
+        assert_eq!(due[0].push_status, crate::db::PushStatus::Pending);
+        assert!(state.push_session("live:steam:570".into()).await.is_err());
     }
 
     #[tokio::test]

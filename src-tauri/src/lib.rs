@@ -10,6 +10,7 @@ mod oauth_loopback;
 mod persist;
 mod pkce;
 mod push;
+mod push_policy;
 mod runtime;
 mod session;
 mod update_check;
@@ -240,6 +241,11 @@ async fn add_manual_game(
 }
 
 #[tauri::command]
+async fn push_session(state: State<'_, Arc<AppState>>, session_id: String) -> Result<(), String> {
+    state.push_session(session_id).await
+}
+
+#[tauri::command]
 async fn open_db(state: State<'_, Arc<AppState>>) -> Result<String, String> {
     let path = state.config.read().await.resolved_db_path();
     let dir = path
@@ -449,6 +455,7 @@ pub fn run() {
             ignore_game,
             unignore_game,
             add_manual_game,
+            push_session,
             open_db,
             open_log_dir,
             is_onboarded,

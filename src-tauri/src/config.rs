@@ -68,6 +68,12 @@ pub struct AppConfig {
     pub db_path: Option<String>,
     pub poll_interval_secs: u64,
     pub retention_acked_days: u32,
+    /// Ended sessions shorter than this are kept local (`skipped`) instead of auto-pushed. 0 = report all.
+    #[serde(default)]
+    pub min_push_duration_mins: u32,
+    /// When true, only auto-push identities that are Tracking-on in the Games list (SKU-aware).
+    #[serde(default)]
+    pub push_from_list_only: bool,
     pub catalog_path: Option<String>,
     /// Override for Discord detectable catalog URL (empty/null → default Discord v10).
     pub detectable_url: Option<String>,
@@ -99,6 +105,8 @@ impl Default for AppConfig {
             db_path: None,
             poll_interval_secs: 3,
             retention_acked_days: 30,
+            min_push_duration_mins: 0,
+            push_from_list_only: false,
             catalog_path: None,
             detectable_url: None,
             steam_path_override: None,
@@ -215,6 +223,21 @@ mod tests {
         assert!(!cfg.minimize_to_tray);
         assert!(!cfg.close_to_tray);
         assert_eq!(cfg.log_level, LogLevel::Off);
+        assert_eq!(cfg.min_push_duration_mins, 0);
+        assert!(!cfg.push_from_list_only);
+    }
+
+    #[test]
+    fn push_filter_fields_roundtrip() {
+        let mut cfg = AppConfig::default();
+        cfg.min_push_duration_mins = 5;
+        cfg.push_from_list_only = true;
+        let raw = serde_json::to_string(&cfg).expect("ser");
+        let back: AppConfig = serde_json::from_str(&raw).expect("de");
+        assert_eq!(back.min_push_duration_mins, 5);
+        assert!(back.push_from_list_only);
+        assert!(raw.contains("\"minPushDurationMins\":5"));
+        assert!(raw.contains("\"pushFromListOnly\":true"));
     }
 
     #[test]

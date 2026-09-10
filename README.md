@@ -152,7 +152,9 @@ See [`config.example.json`](config.example.json) for the full shape:
 | :--- | :--- | :--- |
 | `baseUrl` | — | Questory web or API origin |
 | `pollIntervalSecs` | `3` | Process poll cadence |
-| `retentionAckedDays` | `30` | Synced-row purge (`7` or `30`) |
+| `retentionAckedDays` | `30` | Synced- and skipped-row purge (`7` or `30`) |
+| `minPushDurationMins` | `0` | Keep sessions shorter than this local (`0` = report all) |
+| `pushFromListOnly` | `false` | Auto-sync only games that are Tracking on |
 | `catalogPath` | — | Path to local catalog JSON |
 | `detectableUrl` | Discord v10 detectable | Cached as `detectable.json` |
 | `steamPathOverride` | — | Non-default Steam install |

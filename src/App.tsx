@@ -13,7 +13,7 @@ import "./App.css";
 
 type Tab = "home" | "games" | "settings";
 
-type PushStatus = "active" | "pending" | "synced" | "failed";
+type PushStatus = "active" | "pending" | "synced" | "failed" | "skipped";
 
 interface SessionRow {
   id: string;
@@ -121,7 +121,13 @@ function useElapsedSecs(startedAt?: string) {
   return Math.max(0, Math.floor((now - start) / 1000));
 }
 
-function syncBadge(status: PushStatus) {
+function skipLabel(lastError?: string) {
+  if (lastError === "too_short") return "Too short";
+  if (lastError === "not_on_list") return "Not on list";
+  return "Skipped";
+}
+
+function syncBadge(status: PushStatus, lastError?: string) {
   switch (status) {
     case "synced":
       return <span className="badge ok">Synced</span>;
@@ -129,6 +135,8 @@ function syncBadge(status: PushStatus) {
       return <span className="badge pending">Pending</span>;
     case "failed":
       return <span className="badge fail">Failed</span>;
+    case "skipped":
+      return <span className="badge skip">{skipLabel(lastError)}</span>;
     case "active":
       return <span className="badge live">Playing</span>;
   }
@@ -581,7 +589,50 @@ function App() {
                                 : "—"}
                             </div>
                           </div>
-                          {syncBadge(s.pushStatus)}
+                          <div className="row-actions">
+                            {s.pushStatus === "skipped" ? (
+                              <>
+                                {syncBadge(s.pushStatus, s.lastError)}
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary btn-sm"
+                                  onClick={async () => {
+                                    try {
+                                      await invoke("push_session", {
+                                        sessionId: s.id,
+                                      });
+                                      showToast(`Queued ${s.title}`);
+                                      await refresh();
+                                    } catch (e) {
+                                      showToast(String(e), true);
+                                    }
+                                  }}
+                                >
+                                  Sync
+                                </button>
+                                <button
+                                  type="button"
+                                  className="link-quiet"
+                                  onClick={async () => {
+                                    try {
+                                      await invoke("ignore_game", {
+                                        identityId: s.identityId,
+                                        title: s.title,
+                                      });
+                                      showToast(`Not tracking ${s.title}`);
+                                      await refresh();
+                                    } catch (e) {
+                                      showToast(String(e), true);
+                                    }
+                                  }}
+                                >
+                                  Don&apos;t track
+                                </button>
+                              </>
+                            ) : (
+                              syncBadge(s.pushStatus, s.lastError)
+                            )}
+                          </div>
                         </li>
                       ))}
                     </ul>
@@ -675,6 +726,13 @@ function App() {
                   )}
 
                   <h2 className="section-label">Tracking</h2>
+                  {config?.pushFromListOnly ? (
+                    <p className="setting-row-hint tracking-hint">
+                      Only Tracking-on games auto-sync to Questory. The switch
+                      still means Don&apos;t track (stop recording). Sync held
+                      sessions from Home → Recent.
+                    </p>
+                  ) : null}
                   <label className="field games-search">
                     <span className="sr-only">Search games</span>
                     <input

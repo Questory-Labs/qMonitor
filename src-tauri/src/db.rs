@@ -7,6 +7,7 @@ use turso::{Builder, Connection, Database, Value};
 use uuid::Uuid;
 
 use crate::identity::GameIdentity;
+use crate::push_policy::PushPolicy;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -15,6 +16,7 @@ pub enum PushStatus {
     Pending,
     Synced,
     Failed,
+    Skipped,
 }
 
 impl PushStatus {
@@ -24,15 +26,19 @@ impl PushStatus {
             PushStatus::Pending => "pending",
             PushStatus::Synced => "synced",
             PushStatus::Failed => "failed",
+            PushStatus::Skipped => "skipped",
         }
     }
 
     pub fn parse(s: &str) -> Self {
         match s {
             "active" => PushStatus::Active,
+            "pending" => PushStatus::Pending,
             "synced" => PushStatus::Synced,
             "failed" => PushStatus::Failed,
-            _ => PushStatus::Pending,
+            "skipped" => PushStatus::Skipped,
+            // Unknown must never become due.
+            _ => PushStatus::Skipped,
         }
     }
 }
@@ -257,10 +263,24 @@ impl TursoDb {
         Ok(())
     }
 
+    /// Ends an active session as pending (no skip policy). Prefer
+    /// [`Self::end_session_with_policy`] when filters may apply.
+    #[allow(dead_code)]
     pub async fn end_session_at(
         &self,
         id: &str,
         ended_at: DateTime<Utc>,
+    ) -> Result<SessionRow, String> {
+        self.end_session_with_policy(id, ended_at, &PushPolicy::push_all())
+            .await
+    }
+
+    /// Single write from Active to the final outbox status (`pending` or `skipped`).
+    pub async fn end_session_with_policy(
+        &self,
+        id: &str,
+        ended_at: DateTime<Utc>,
+        policy: &PushPolicy,
     ) -> Result<SessionRow, String> {
         let mut row = self
             .get_session(id)
@@ -275,24 +295,46 @@ impl TursoDb {
             ended_at
         };
         let duration = (ended - row.started_at).num_seconds().max(0);
-        let next_retry_at = Utc::now();
         row.ended_at = Some(ended);
         row.duration_secs = Some(duration);
-        row.push_status = PushStatus::Pending;
-        row.next_retry_at = Some(next_retry_at);
-        self.conn
-            .execute(
-                r#"UPDATE sessions SET ended_at=?, duration_secs=?, push_status=?, next_retry_at=? WHERE id=?"#,
-                (
-                    ended.to_rfc3339(),
-                    duration,
-                    PushStatus::Pending.as_str(),
-                    next_retry_at.to_rfc3339(),
-                    id,
-                ),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+        if let Some(reason) = policy.skip_reason(&row.identity_id, row.steam_app_id, duration) {
+            row.push_status = PushStatus::Skipped;
+            row.next_retry_at = None;
+            row.last_error = Some(reason.as_str().into());
+            self.conn
+                .execute(
+                    r#"UPDATE sessions SET ended_at=?, duration_secs=?, push_status=?, next_retry_at=NULL, last_error=?
+                       WHERE id=? AND push_status='active'"#,
+                    (
+                        ended.to_rfc3339(),
+                        duration,
+                        PushStatus::Skipped.as_str(),
+                        reason.as_str(),
+                        id,
+                    ),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+        } else {
+            let next_retry_at = Utc::now();
+            row.push_status = PushStatus::Pending;
+            row.next_retry_at = Some(next_retry_at);
+            row.last_error = None;
+            self.conn
+                .execute(
+                    r#"UPDATE sessions SET ended_at=?, duration_secs=?, push_status=?, next_retry_at=?, last_error=NULL
+                       WHERE id=? AND push_status='active'"#,
+                    (
+                        ended.to_rfc3339(),
+                        duration,
+                        PushStatus::Pending.as_str(),
+                        next_retry_at.to_rfc3339(),
+                        id,
+                    ),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+        }
         Ok(row)
     }
 
@@ -300,7 +342,8 @@ impl TursoDb {
         let now = Utc::now().to_rfc3339();
         self.conn
             .execute(
-                r#"UPDATE sessions SET push_status=?, acked_at=?, last_error=NULL, next_retry_at=NULL WHERE id=?"#,
+                r#"UPDATE sessions SET push_status=?, acked_at=?, last_error=NULL, next_retry_at=NULL
+                   WHERE id=? AND push_status IN ('pending','failed')"#,
                 (PushStatus::Synced.as_str(), now.as_str(), id),
             )
             .await
@@ -323,7 +366,8 @@ impl TursoDb {
         let next = (Utc::now() + Duration::seconds(delay_secs)).to_rfc3339();
         self.conn
             .execute(
-                r#"UPDATE sessions SET push_status=?, last_error=?, retry_count=?, next_retry_at=? WHERE id=?"#,
+                r#"UPDATE sessions SET push_status=?, last_error=?, retry_count=?, next_retry_at=?
+                   WHERE id=? AND push_status IN ('pending','failed')"#,
                 (
                     PushStatus::Failed.as_str(),
                     error,
@@ -334,6 +378,27 @@ impl TursoDb {
             )
             .await
             .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// CAS skipped → pending so Home → Recent can sync a held-back session.
+    pub async fn mark_pending_now(&self, id: &str) -> Result<(), String> {
+        if id.starts_with("live:") {
+            return Err("cannot sync a live session".into());
+        }
+        let next = Utc::now().to_rfc3339();
+        let n = self
+            .conn
+            .execute(
+                r#"UPDATE sessions SET push_status=?, next_retry_at=?, last_error=NULL
+                   WHERE id=? AND push_status='skipped' AND ended_at IS NOT NULL"#,
+                (PushStatus::Pending.as_str(), next.as_str(), id),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("session is not skipped".into());
+        }
         Ok(())
     }
 
@@ -744,5 +809,101 @@ mod tests {
         assert_eq!(list[0].title, "Dota 2 Updated");
         db.remove_ignored("steam:570").await.unwrap();
         assert!(db.list_ignored().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn short_session_ends_skipped_and_is_not_due() {
+        let dir = tempdir().unwrap();
+        let db = TursoDb::open(dir.path().join("skip.db"))
+            .await
+            .expect("open");
+        let started = Utc::now() - Duration::seconds(30);
+        let row = db
+            .open_session_at(&sample_identity(), started)
+            .await
+            .unwrap();
+        let policy = crate::push_policy::PushPolicy {
+            min_duration_secs: 300,
+            allowlist: None,
+        };
+        let ended = db
+            .end_session_with_policy(&row.id, Utc::now(), &policy)
+            .await
+            .unwrap();
+        assert_eq!(ended.push_status, PushStatus::Skipped);
+        assert_eq!(ended.last_error.as_deref(), Some("too_short"));
+        assert!(db.list_due_pushes().await.unwrap().is_empty());
+        db.mark_pending_now(&row.id).await.unwrap();
+        let due = db.list_due_pushes().await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, row.id);
+        assert_eq!(due[0].push_status, PushStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn mark_pending_now_refuses_live_and_active() {
+        let dir = tempdir().unwrap();
+        let db = TursoDb::open(dir.path().join("cas.db"))
+            .await
+            .expect("open");
+        let row = db
+            .open_session_at(&sample_identity(), Utc::now())
+            .await
+            .unwrap();
+        assert!(db.mark_pending_now("live:steam:570").await.is_err());
+        assert!(db.mark_pending_now(&row.id).await.is_err());
+        db.end_session_at(&row.id, Utc::now()).await.unwrap();
+        db.mark_synced(&row.id).await.unwrap();
+        assert!(db.mark_pending_now(&row.id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn parse_unknown_status_is_not_pending() {
+        assert_eq!(PushStatus::parse("skipped"), PushStatus::Skipped);
+        assert_eq!(PushStatus::parse("pending"), PushStatus::Pending);
+        assert_eq!(PushStatus::parse("garbage"), PushStatus::Skipped);
+    }
+
+    #[tokio::test]
+    async fn purge_synced_leaves_old_skipped() {
+        let dir = tempdir().unwrap();
+        let db = TursoDb::open(dir.path().join("purge-skip.db"))
+            .await
+            .expect("open");
+        let started = Utc::now() - Duration::days(40);
+        let row = db.open_session_at(&sample_identity(), started).await.unwrap();
+        let policy = crate::push_policy::PushPolicy {
+            min_duration_secs: 300,
+            allowlist: None,
+        };
+        db.end_session_with_policy(&row.id, started + Duration::seconds(10), &policy)
+            .await
+            .unwrap();
+        assert_eq!(db.purge_synced(30).await.unwrap(), 0);
+        let kept = db.get_session(&row.id).await.unwrap().unwrap();
+        assert_eq!(kept.push_status, PushStatus::Skipped);
+    }
+
+    #[tokio::test]
+    async fn mark_synced_does_not_clobber_skipped() {
+        let dir = tempdir().unwrap();
+        let db = TursoDb::open(dir.path().join("noclobber.db"))
+            .await
+            .expect("open");
+        let started = Utc::now() - Duration::seconds(10);
+        let row = db
+            .open_session_at(&sample_identity(), started)
+            .await
+            .unwrap();
+        let policy = crate::push_policy::PushPolicy {
+            min_duration_secs: 300,
+            allowlist: None,
+        };
+        db.end_session_with_policy(&row.id, Utc::now(), &policy)
+            .await
+            .unwrap();
+        db.mark_synced(&row.id).await.unwrap();
+        let got = db.get_session(&row.id).await.unwrap().unwrap();
+        assert_eq!(got.push_status, PushStatus::Skipped);
     }
 }

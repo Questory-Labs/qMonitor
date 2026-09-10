@@ -627,6 +627,10 @@ code {
   font-size: 0.8rem;
 }
 
+.tracking-hint {
+  margin: -0.35rem 0 0.75rem;
+}
+
 .games-search {
   margin-top: 0;
   margin-bottom: 0.65rem;
@@ -924,6 +928,11 @@ code {
 .badge.fail {
   background: color-mix(in srgb, var(--danger) 16%, transparent);
   color: var(--danger);
+}
+
+.badge.skip {
+  background: color-mix(in srgb, var(--muted) 22%, transparent);
+  color: var(--muted);
 }
 
 .badge.live {

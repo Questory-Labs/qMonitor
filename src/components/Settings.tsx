@@ -15,6 +15,8 @@ export interface AppConfig {
   dbPath?: string;
   pollIntervalSecs: number;
   retentionAckedDays: number;
+  minPushDurationMins?: number;
+  pushFromListOnly?: boolean;
   catalogPath?: string;
   detectableUrl?: string;
   steamPathOverride?: string;
@@ -338,6 +340,53 @@ export function Settings({
               <option value={30}>30 days</option>
             </select>
           </div>
+        </div>
+        <div className="setting-row">
+          <div className="setting-row-text">
+            <span className="setting-row-label">Minimum session</span>
+            <span className="setting-row-hint">Minutes · 0 = report all</span>
+          </div>
+          <div className="setting-row-control">
+            <input
+              type="number"
+              min={0}
+              value={config.minPushDurationMins ?? 0}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                setConfig({
+                  ...config,
+                  minPushDurationMins:
+                    Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0,
+                });
+              }}
+              aria-label="Minimum session duration in minutes"
+            />
+          </div>
+        </div>
+        <div className="setting-row">
+          <div className="setting-row-text">
+            <span className="setting-row-label">
+              Only auto-sync games that are Tracking on
+            </span>
+            <span className="setting-row-hint">
+              Other titles stay local. Sync them from Home → Recent. The Games
+              switch still means Don&apos;t track.
+            </span>
+          </div>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={config.pushFromListOnly ?? false}
+              onChange={(e) =>
+                void saveSettings({
+                  ...config,
+                  pushFromListOnly: e.target.checked,
+                })
+              }
+              aria-label="Only auto-sync games that are Tracking on"
+            />
+            <span className="toggle-ui" />
+          </label>
         </div>
       </section>
 

@@ -11,6 +11,7 @@ use tokio::time::timeout;
 
 use crate::db::{SessionRow, TursoDb};
 use crate::identity::{GameIdentity, ManualGame};
+use crate::push_policy::PushPolicy;
 #[cfg(test)]
 use crate::live_session::LiveSession;
 use crate::live_session::{DetectSample, PendingEnd, SLEEP_SPLIT};
@@ -49,6 +50,10 @@ pub enum PersistCmd {
     EnsureOpen {
         reply: tokio::sync::oneshot::Sender<Result<String, String>>,
     },
+    ForcePush {
+        session_id: String,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -78,9 +83,18 @@ fn persist_reply(res: &Result<(), PersistError>) -> Result<(), String> {
 /// Flush pending ends + current tracking onto the DB. DB start wins when a row exists.
 #[cfg(test)]
 pub async fn flush_live(db: &TursoDb, live: &mut LiveSession) -> Result<(), String> {
+    flush_live_with_policy(db, live, &PushPolicy::push_all()).await
+}
+
+#[cfg(test)]
+pub async fn flush_live_with_policy(
+    db: &TursoDb,
+    live: &mut LiveSession,
+    policy: &PushPolicy,
+) -> Result<(), String> {
     let pending = std::mem::take(&mut live.pending_ends);
     for end in pending {
-        write_pending_end(db, &end).await?;
+        write_pending_end(db, &end, policy).await?;
     }
     if let Some((id, started)) = reconcile_live(
         db,
@@ -88,6 +102,7 @@ pub async fn flush_live(db: &TursoDb, live: &mut LiveSession) -> Result<(), Stri
         live.started_at,
         live.last_seen_at,
         live.last_tick_at,
+        policy,
     )
     .await?
     {
@@ -97,11 +112,15 @@ pub async fn flush_live(db: &TursoDb, live: &mut LiveSession) -> Result<(), Stri
     Ok(())
 }
 
-async fn write_pending_end(db: &TursoDb, end: &PendingEnd) -> Result<(), String> {
+async fn write_pending_end(
+    db: &TursoDb,
+    end: &PendingEnd,
+    policy: &PushPolicy,
+) -> Result<(), String> {
     if let Some(id) = &end.db_session_id {
         if let Some(row) = db.get_session(id).await? {
             if row.push_status == crate::db::PushStatus::Active {
-                db.end_session_at(id, end.ended_at).await?;
+                db.end_session_with_policy(id, end.ended_at, policy).await?;
                 return Ok(());
             }
         }
@@ -109,12 +128,14 @@ async fn write_pending_end(db: &TursoDb, end: &PendingEnd) -> Result<(), String>
     let actives = db.list_active().await?;
     let mut found = false;
     for row in actives.iter().filter(|s| s.identity_id == end.identity.id) {
-        db.end_session_at(&row.id, end.ended_at).await?;
+        db.end_session_with_policy(&row.id, end.ended_at, policy)
+            .await?;
         found = true;
     }
     if !found {
         let opened = db.open_session_at(&end.identity, end.started_at).await?;
-        db.end_session_at(&opened.id, end.ended_at).await?;
+        db.end_session_with_policy(&opened.id, end.ended_at, policy)
+            .await?;
     }
     Ok(())
 }
@@ -127,6 +148,7 @@ async fn reconcile_live(
     started_at: Option<DateTime<Utc>>,
     last_seen_at: Option<DateTime<Utc>>,
     last_tick_at: Option<DateTime<Utc>>,
+    policy: &PushPolicy,
 ) -> Result<Option<(String, DateTime<Utc>)>, String> {
     if let Some(identity) = identity {
         let started = started_at.unwrap_or_else(Utc::now);
@@ -137,7 +159,8 @@ async fn reconcile_live(
         let actives = db.list_active().await?;
         let last_seen = last_seen_at.unwrap_or(row.started_at);
         for other in actives.iter().filter(|s| s.identity_id != identity.id) {
-            db.end_session_at(&other.id, last_seen).await?;
+            db.end_session_with_policy(&other.id, last_seen, policy)
+                .await?;
         }
 
         let mut same: Vec<_> = db
@@ -160,7 +183,7 @@ async fn reconcile_live(
         for row in db.list_active().await? {
             let cap = row.started_at + SLEEP_SPLIT;
             let ended = Utc::now().min(cap);
-            db.end_session_at(&row.id, ended).await?;
+            db.end_session_with_policy(&row.id, ended, policy).await?;
         }
         Ok(None)
     } else {
@@ -290,9 +313,10 @@ async fn persist_loop(
                 apply_sample(state, db, push_tx).await?;
             }
             Some(cmd) = cmd_rx.recv() => {
-                handle_cmd(state, db, opened_path, cmd).await?;
+                handle_cmd(state, db, opened_path, cmd, push_tx).await?;
             }
             Some((id, result)) = push_result_rx.recv() => {
+                release_push(state, &id).await;
                 match result {
                     Ok(()) => timed(db.mark_synced(&id)).await?,
                     Err(e) => {
@@ -324,13 +348,14 @@ async fn apply_sample(
     db: &TursoDb,
     push_tx: &mpsc::Sender<SessionRow>,
 ) -> Result<(), PersistError> {
+    let policy = snapshot_policy(state).await;
     let pending = {
         let mut live = state.live.write().await;
         std::mem::take(&mut live.pending_ends)
     };
     let mut pending = pending.into_iter();
     while let Some(end) = pending.next() {
-        if let Err(e) = timed(write_pending_end(db, &end)).await {
+        if let Err(e) = timed(write_pending_end(db, &end, &policy)).await {
             let mut live = state.live.write().await;
             let mut rest: Vec<_> = std::iter::once(end).chain(pending).collect();
             rest.append(&mut live.pending_ends);
@@ -346,6 +371,7 @@ async fn apply_sample(
         snapshot.started_at,
         snapshot.last_seen_at,
         snapshot.last_tick_at,
+        &policy,
     ))
     .await?;
     if let (Some(identity), Some((id, started))) = (snapshot.identity.as_ref(), keep) {
@@ -356,20 +382,54 @@ async fn apply_sample(
         }
     }
 
-    enqueue_due(db, push_tx).await?;
+    enqueue_due(state, db, push_tx).await?;
     refresh_and_store(state, db).await?;
     state.health.write().await.last_persist_at = Some(Utc::now());
     Ok(())
 }
 
-async fn enqueue_due(db: &TursoDb, push_tx: &mpsc::Sender<SessionRow>) -> Result<(), PersistError> {
+async fn snapshot_policy(state: &AppState) -> PushPolicy {
+    let cfg = state.config.read().await;
+    let pipe = state.pipeline.read().await;
+    PushPolicy::from_config(&cfg, &pipe)
+}
+
+struct EnqueueReport {
+    sent_ids: Vec<String>,
+    blocked: bool,
+}
+
+async fn claim_push(state: &AppState, id: &str) -> bool {
+    state.push_in_flight.write().await.insert(id.to_string())
+}
+
+async fn release_push(state: &AppState, id: &str) {
+    state.push_in_flight.write().await.remove(id);
+}
+
+async fn enqueue_due(
+    state: &AppState,
+    db: &TursoDb,
+    push_tx: &mpsc::Sender<SessionRow>,
+) -> Result<EnqueueReport, PersistError> {
     let due = timed(db.list_due_pushes()).await?;
+    let mut sent_ids = Vec::new();
+    let mut blocked = false;
     for row in due {
-        if push_tx.try_send(row).is_err() {
-            break;
+        let id = row.id.clone();
+        if !claim_push(state, &id).await {
+            continue;
+        }
+        match push_tx.try_send(row) {
+            Ok(()) => sent_ids.push(id),
+            Err(e) => {
+                release_push(state, &e.into_inner().id).await;
+                blocked = true;
+                break;
+            }
         }
     }
-    Ok(())
+    Ok(EnqueueReport { sent_ids, blocked })
 }
 
 async fn refresh_and_store(state: &AppState, db: &TursoDb) -> Result<(), PersistError> {
@@ -383,6 +443,7 @@ async fn handle_cmd(
     db: &TursoDb,
     opened_path: &Path,
     cmd: PersistCmd,
+    push_tx: &mpsc::Sender<SessionRow>,
 ) -> Result<(), PersistError> {
     match cmd {
         PersistCmd::Confirm {
@@ -472,6 +533,42 @@ async fn handle_cmd(
                     return Err(PersistError::Poison(e));
                 }
                 Err(PersistError::PathChanged) => return Err(PersistError::PathChanged),
+            }
+        }
+        PersistCmd::ForcePush { session_id, reply } => {
+            match timeout(DB_OP_TIMEOUT, db.mark_pending_now(&session_id)).await {
+                Ok(Ok(())) => {
+                    match enqueue_due(state, db, push_tx).await {
+                        Ok(report) => {
+                            let in_flight =
+                                state.push_in_flight.read().await.contains(&session_id);
+                            if report.sent_ids.iter().any(|id| id == &session_id)
+                                || in_flight
+                            {
+                                let _ = reply.send(persist_reply(&Ok(())));
+                            } else if report.blocked {
+                                let _ = reply.send(Err("push queue busy".into()));
+                            } else {
+                                let _ = reply.send(Err("session is not due".into()));
+                            }
+                        }
+                        Err(e) => {
+                            let out = persist_reply(&Err(match &e {
+                                PersistError::Poison(msg) => PersistError::Poison(msg.clone()),
+                                PersistError::PathChanged => PersistError::PathChanged,
+                            }));
+                            let _ = reply.send(out);
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    let _ = reply.send(Err(e));
+                }
+                Err(_) => {
+                    let _ = reply.send(Err("persist timeout".into()));
+                    return Err(PersistError::Poison("db op timeout".into()));
+                }
             }
         }
     }
@@ -576,5 +673,168 @@ mod tests {
         assert_eq!(live.db_session_id.as_deref(), Some(opened.id.as_str()));
         assert_eq!(live.started_at, Some(db_start));
         assert_eq!(db.list_active().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_sample_skips_short_session_and_does_not_enqueue() {
+        let state = crate::session::AppState::new();
+        {
+            let mut cfg = state.config.write().await;
+            cfg.min_push_duration_mins = 5;
+            cfg.push_from_list_only = false;
+        }
+        let dir = tempdir().unwrap();
+        let db = TursoDb::open(dir.path().join("apply-skip.db"))
+            .await
+            .unwrap();
+        let t0 = Utc::now() - ChronoDuration::seconds(40);
+        let t1 = t0 + ChronoDuration::seconds(20);
+        state.live.write().await.pending_ends.push(PendingEnd {
+            identity: identity("steam:570", "Dota"),
+            db_session_id: None,
+            started_at: t0,
+            ended_at: t1,
+        });
+        let (push_tx, mut push_rx) = mpsc::channel(8);
+        apply_sample(&state, &db, &push_tx).await.unwrap();
+        assert!(push_rx.try_recv().is_err());
+        assert!(db.list_due_pushes().await.unwrap().is_empty());
+        let rows = db.list_sessions(10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].push_status, crate::db::PushStatus::Skipped);
+        assert_eq!(rows[0].last_error.as_deref(), Some("too_short"));
+    }
+
+    #[tokio::test]
+    async fn apply_sample_skips_off_list_without_sku() {
+        let state = crate::session::AppState::new();
+        {
+            let mut cfg = state.config.write().await;
+            cfg.min_push_duration_mins = 0;
+            cfg.push_from_list_only = true;
+        }
+        let dir = tempdir().unwrap();
+        let db = TursoDb::open(dir.path().join("apply-list.db"))
+            .await
+            .unwrap();
+        let t0 = Utc::now() - ChronoDuration::hours(1);
+        let t1 = t0 + ChronoDuration::minutes(50);
+        state.live.write().await.pending_ends.push(PendingEnd {
+            identity: GameIdentity {
+                id: "discord:111".into(),
+                title: "Unknown".into(),
+                steam_app_id: None,
+                exe: Some("game.exe".into()),
+                confidence: Confidence::High,
+                source: "discord".into(),
+                fingerprint: None,
+            },
+            db_session_id: None,
+            started_at: t0,
+            ended_at: t1,
+        });
+        let (push_tx, mut push_rx) = mpsc::channel(8);
+        apply_sample(&state, &db, &push_tx).await.unwrap();
+        assert!(push_rx.try_recv().is_err());
+        let rows = db.list_sessions(10).await.unwrap();
+        assert_eq!(rows[0].push_status, crate::db::PushStatus::Skipped);
+        assert_eq!(rows[0].last_error.as_deref(), Some("not_on_list"));
+    }
+
+    #[tokio::test]
+    async fn apply_sample_allowlist_pushes_discord_when_steam_sku_enabled() {
+        let state = crate::session::AppState::new();
+        {
+            let mut cfg = state.config.write().await;
+            cfg.min_push_duration_mins = 0;
+            cfg.push_from_list_only = true;
+        }
+        state.pipeline.write().await.steam.games.insert(
+            570,
+            crate::identity::steam_library::SteamGame {
+                app_id: 570,
+                title: "Dota 2".into(),
+                install_path: std::path::PathBuf::from("/dota"),
+            },
+        );
+        let dir = tempdir().unwrap();
+        let db = TursoDb::open(dir.path().join("apply-sku.db"))
+            .await
+            .unwrap();
+        let t0 = Utc::now() - ChronoDuration::hours(1);
+        let t1 = t0 + ChronoDuration::minutes(50);
+        state.live.write().await.pending_ends.push(PendingEnd {
+            identity: GameIdentity {
+                id: "discord:111".into(),
+                title: "Dota 2".into(),
+                steam_app_id: Some(570),
+                exe: Some("dota2.exe".into()),
+                confidence: Confidence::High,
+                source: "discord".into(),
+                fingerprint: None,
+            },
+            db_session_id: None,
+            started_at: t0,
+            ended_at: t1,
+        });
+        let (push_tx, mut push_rx) = mpsc::channel(8);
+        apply_sample(&state, &db, &push_tx).await.unwrap();
+        let sent = push_rx.try_recv().expect("enqueued");
+        assert_eq!(sent.identity_id, "discord:111");
+        assert_eq!(sent.push_status, crate::db::PushStatus::Pending);
+    }
+
+    async fn pending_due_session(db: &TursoDb) -> crate::db::SessionRow {
+        let ident = identity("steam:570", "Dota");
+        let started = Utc::now() - ChronoDuration::hours(1);
+        let row = db.open_session_at(&ident, started).await.unwrap();
+        db.end_session_at(&row.id, Utc::now()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn enqueue_due_one_post_until_success_ack() {
+        let state = crate::session::AppState::new();
+        let dir = tempdir().unwrap();
+        let db = TursoDb::open(dir.path().join("once-ok.db")).await.unwrap();
+        let row = pending_due_session(&db).await;
+        let (push_tx, mut push_rx) = mpsc::channel(8);
+
+        let first = enqueue_due(&state, &db, &push_tx).await.unwrap();
+        assert_eq!(first.sent_ids, vec![row.id.clone()]);
+        let second = enqueue_due(&state, &db, &push_tx).await.unwrap();
+        assert!(second.sent_ids.is_empty());
+        assert_eq!(push_rx.try_recv().unwrap().id, row.id);
+        assert!(push_rx.try_recv().is_err());
+
+        release_push(&state, &row.id).await;
+        db.mark_synced(&row.id).await.unwrap();
+        let after = enqueue_due(&state, &db, &push_tx).await.unwrap();
+        assert!(after.sent_ids.is_empty());
+        assert!(push_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn enqueue_due_one_post_until_error_then_retry() {
+        let state = crate::session::AppState::new();
+        let dir = tempdir().unwrap();
+        let db = TursoDb::open(dir.path().join("once-err.db")).await.unwrap();
+        let row = pending_due_session(&db).await;
+        let (push_tx, mut push_rx) = mpsc::channel(8);
+
+        assert_eq!(
+            enqueue_due(&state, &db, &push_tx).await.unwrap().sent_ids,
+            vec![row.id.clone()]
+        );
+        assert!(enqueue_due(&state, &db, &push_tx)
+            .await
+            .unwrap()
+            .sent_ids
+            .is_empty());
+        assert_eq!(push_rx.try_recv().unwrap().id, row.id);
+
+        release_push(&state, &row.id).await;
+        let retry = enqueue_due(&state, &db, &push_tx).await.unwrap();
+        assert_eq!(retry.sent_ids, vec![row.id.clone()]);
+        assert_eq!(push_rx.try_recv().unwrap().id, row.id);
     }
 }

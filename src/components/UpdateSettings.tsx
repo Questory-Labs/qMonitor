@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 import type { PendingUpdate } from "./UpdateBanner";
+import { HatchShadow } from "./HatchShadow";
 
 export type UpdateChannel = "stable" | "canary";
 
@@ -41,7 +42,7 @@ export function UpdateSettings({
   }
 
   return (
-    <section className="settings-card">
+    <HatchShadow size="sm" faceClassName="panel settings-face">
       <h2 className="section-label">Updates</h2>
       <div className="setting-row">
         <div className="setting-row-text">
@@ -59,9 +60,10 @@ export function UpdateSettings({
           {checking ? "Checking…" : "Check now"}
         </button>
       </div>
-      <label className="field">
+      <label className="label">
         <span>Release channel</span>
         <select
+          className="field"
           value={channel}
           onChange={(e) =>
             void onChannelChange(e.target.value as UpdateChannel)
@@ -71,6 +73,6 @@ export function UpdateSettings({
           <option value="canary">Canary (prerelease)</option>
         </select>
       </label>
-    </section>
+    </HatchShadow>
   );
 }

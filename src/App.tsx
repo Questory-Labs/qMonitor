@@ -2,6 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Dialog } from "./components/Dialog";
+import { EmptyFace } from "./components/EmptyFace";
+import { HatchShadow } from "./components/HatchShadow";
+import { OnboardScreen } from "./components/OnboardScreen";
+import { RecentSessions } from "./components/RecentSessions";
 import { QMark } from "./components/QMark";
 import {
   Settings,
@@ -9,6 +14,14 @@ import {
   type AuthState,
 } from "./components/Settings";
 import { UpdateBanner } from "./components/UpdateBanner";
+import {
+  isBrowserPreview,
+  PREVIEW_AUTH,
+  PREVIEW_CONFIG,
+  PREVIEW_GAMES,
+  PREVIEW_HOME,
+  previewOnboarded,
+} from "./preview-state";
 import "./App.css";
 
 type Tab = "home" | "games" | "settings";
@@ -80,26 +93,6 @@ async function invokeTimeout<T>(
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
-}
-
-function BrandMark({ size = "sm" }: { size?: "sm" | "md" }) {
-  const px = size === "md" ? 36 : 28;
-  return (
-    <div className="brand-mark">
-      <img src="/favicon.svg" alt="" width={px} height={px} />
-      <span>qMonitor</span>
-    </div>
-  );
-}
-
-function formatDuration(secs?: number) {
-  if (secs == null) return "—";
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  const s = secs % 60;
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
 }
 
 function formatLiveClock(totalSecs: number) {
@@ -178,8 +171,20 @@ function App() {
 
   const elapsed = useElapsedSecs(home?.active?.startedAt);
 
+  const applyPreview = useCallback(() => {
+    setHome(PREVIEW_HOME);
+    setAuth(PREVIEW_AUTH);
+    setOnboarded(previewOnboarded());
+    setGames(PREVIEW_GAMES);
+    setConfig(PREVIEW_CONFIG);
+  }, []);
+
   /** Live status only — never overwrite draft settings while the user is typing. */
   const refresh = useCallback(async () => {
+    if (isBrowserPreview()) {
+      applyPreview();
+      return;
+    }
     try {
       const [h, a, o, g] = await Promise.all([
         invokeTimeout<HomeState>("get_home"),
@@ -201,19 +206,32 @@ function App() {
       lastTimeoutToast.current = isTimeout ? text : null;
       showToast(text, true);
     }
-  }, [showToast]);
+  }, [applyPreview, showToast]);
 
   const loadConfig = useCallback(async () => {
+    if (isBrowserPreview()) {
+      applyPreview();
+      return;
+    }
     try {
       setConfig(await invoke<AppConfig>("get_config"));
     } catch (e) {
       showToast(String(e), true);
     }
-  }, [showToast]);
+  }, [applyPreview, showToast]);
 
   useEffect(() => {
     void loadConfig();
     void refresh();
+    if (isBrowserPreview()) {
+      const params = new URLSearchParams(window.location.search);
+      const tabParam = params.get("tab");
+      if (tabParam === "home" || tabParam === "games" || tabParam === "settings") {
+        setTab(tabParam);
+      }
+      if (params.has("add")) setAddOpen(true);
+      return;
+    }
     const unsubs: Array<() => void> = [];
     const onTick = () => {
       if (typeof document !== "undefined" && document.hidden) return;
@@ -425,118 +443,48 @@ function App() {
       <UpdateBanner />
       <div className="scroll-body">
         {needsOnboarding ? (
-          <div className="onboard-screen">
-            <div className="onboard-col">
-              <BrandMark size="md" />
-              <p className="eyebrow">Desktop monitor</p>
-              <h1>Connect to Questory</h1>
-              <p className="lede">
-                Point qMonitor at your Questory instance, then sign in to start
-                tracking game sessions.
-              </p>
-
-              {loginPhase === "waiting" ? (
-                <div className="login-wait">
-                  <QMark variant="loading" />
-                  <h2 className="wait-title">Waiting for Questory…</h2>
-                  <p className="lede">
-                    Finish login in your browser. Listening on{" "}
-                    <code>127.0.0.1:58473</code> — you&apos;ll be signed in
-                    automatically.
-                  </p>
-                  <div className="actions" style={{ justifyContent: "center" }}>
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={onCancelLogin}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      onClick={() => setShowManualAuth((v) => !v)}
-                    >
-                      {showManualAuth ? "Hide paste" : "Paste callback URL"}
-                    </button>
-                  </div>
-                  {showManualAuth ? (
-                    <div className="manual-auth">
-                      <label className="field">
-                        <span>Callback URL (with code=)</span>
-                        <input
-                          value={callbackUrl}
-                          onChange={(e) => setCallbackUrl(e.target.value)}
-                          placeholder="Full callback URL containing code="
-                          autoFocus
-                        />
-                      </label>
-                      <div className="actions">
-                        <button
-                          type="button"
-                          className="btn btn-primary"
-                          onClick={onCompleteLogin}
-                        >
-                          Complete login
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
-              ) : (
-                <>
-                  <label className="field">
-                    <span>Questory URL</span>
-                    <input
-                      value={config.baseUrl ?? ""}
-                      onChange={(e) =>
-                        setConfig({ ...config, baseUrl: e.target.value })
-                      }
-                      placeholder="https://app.questorylabs.com"
-                    />
-                  </label>
-                  <div className="actions">
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      onClick={saveAndTest}
-                      disabled={testingUrl}
-                    >
-                      {testingUrl ? "Testing…" : "Save & test"}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={onStartLogin}
-                    >
-                      Log in with Questory
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
+          <OnboardScreen
+            config={config}
+            setConfig={setConfig}
+            loginPhase={loginPhase}
+            showManualAuth={showManualAuth}
+            setShowManualAuth={setShowManualAuth}
+            callbackUrl={callbackUrl}
+            setCallbackUrl={setCallbackUrl}
+            testingUrl={testingUrl}
+            saveAndTest={() => void saveAndTest()}
+            onStartLogin={() => void onStartLogin()}
+            onCancelLogin={() => void onCancelLogin()}
+            onCompleteLogin={() => void onCompleteLogin()}
+          />
         ) : (
           <div className="app-frame">
-            <nav className="tabs">
-              {(["home", "games", "settings"] as Tab[]).map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  className={tab === t ? "active" : ""}
-                  onClick={() => setTab(t)}
-                >
-                  {t[0].toUpperCase() + t.slice(1)}
-                </button>
-              ))}
-            </nav>
+            <div className="chrome">
+              <nav className="tabs" aria-label="Primary">
+                {(["home", "games", "settings"] as Tab[]).map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    className="nav-hatch"
+                    data-active={tab === t}
+                    aria-current={tab === t ? "page" : undefined}
+                    onClick={() => setTab(t)}
+                  >
+                    {t[0].toUpperCase() + t.slice(1)}
+                  </button>
+                ))}
+              </nav>
+            </div>
 
             <main className="content">
               {tab === "home" && (
-                <section className="panel">
+                <>
                   <h2 className="section-label">Now playing</h2>
                   {home?.active ? (
-                    <div className="active-session">
+                    <HatchShadow
+                      size="sm"
+                      faceClassName="panel-accent active-session"
+                    >
                       <div className="active-session-top">
                         <strong className="active-title">
                           {home.active.title}
@@ -572,80 +520,45 @@ function App() {
                           Don&apos;t track
                         </button>
                       </div>
-                    </div>
+                    </HatchShadow>
                   ) : (
-                    <p className="empty-state">No game playing</p>
+                    <EmptyFace title="No game playing" />
                   )}
 
                   <h2 className="section-label">Recent</h2>
-                  {history.length === 0 ? (
-                    <p className="empty-state">No sessions yet</p>
-                  ) : (
-                    <ul className="session-list">
-                      {history.map((s) => (
-                        <li key={s.id} className="row-item">
-                          <div>
-                            <strong>{s.title}</strong>
-                            <div className="meta">
-                              {formatDuration(s.durationSecs)} ·{" "}
-                              {s.endedAt
-                                ? new Date(s.endedAt).toLocaleString()
-                                : "—"}
-                            </div>
-                          </div>
-                          <div className="row-actions">
-                            {s.pushStatus === "skipped" ? (
-                              <>
-                                {syncBadge(s.pushStatus, s.lastError)}
-                                <button
-                                  type="button"
-                                  className="btn btn-secondary btn-sm"
-                                  onClick={async () => {
-                                    try {
-                                      await invokeTimeout("push_session", 12000, {
-                                        sessionId: s.id,
-                                      });
-                                      showToast(`Queued ${s.title}`);
-                                      await refresh();
-                                    } catch (e) {
-                                      showToast(String(e), true);
-                                    }
-                                  }}
-                                >
-                                  Sync
-                                </button>
-                                <button
-                                  type="button"
-                                  className="link-quiet"
-                                  onClick={async () => {
-                                    try {
-                                      await invoke("ignore_game", {
-                                        identityId: s.identityId,
-                                        title: s.title,
-                                      });
-                                      showToast(`Not tracking ${s.title}`);
-                                      await refresh();
-                                    } catch (e) {
-                                      showToast(String(e), true);
-                                    }
-                                  }}
-                                >
-                                  Don&apos;t track
-                                </button>
-                              </>
-                            ) : (
-                              syncBadge(s.pushStatus, s.lastError)
-                            )}
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </section>
+                  <RecentSessions
+                    history={history}
+                    onSync={async (s) => {
+                      try {
+                        await invokeTimeout("push_session", 12000, {
+                          sessionId: s.id,
+                        });
+                        showToast(`Queued ${s.title}`);
+                        await refresh();
+                      } catch (e) {
+                        showToast(String(e), true);
+                        throw e;
+                      }
+                    }}
+                    onIgnore={async (s) => {
+                      try {
+                        await invoke("ignore_game", {
+                          identityId: s.identityId,
+                          title: s.title,
+                        });
+                        showToast(`Not tracking ${s.title}`);
+                        await refresh();
+                      } catch (e) {
+                        showToast(String(e), true);
+                        throw e;
+                      }
+                    }}
+                  />
+                </>
               )}
 
               {tab === "games" && (
-                <section className="panel">
+                <>
                   <div className="section-row">
                     <h2 className="section-label">Needs confirmation</h2>
                     <button
@@ -657,76 +570,82 @@ function App() {
                     </button>
                   </div>
                   {(home?.pendingDetections ?? []).length === 0 ? (
-                    <p className="empty-state">No games waiting</p>
+                    <EmptyFace title="No games waiting" />
                   ) : (
-                    <ul className="session-list">
-                      {home!.pendingDetections.map((p) => (
-                        <li key={p.fingerprint} className="row-item pending-row">
-                          <div className="pending-body">
-                            <strong>{p.suggestedTitle}</strong>
-                            <div className="meta">
-                              {p.processName}
-                              {p.exePath ? ` · ${p.exePath}` : ""}
+                    <div className="panel-outline">
+                      <ul className="session-list">
+                        {home!.pendingDetections.map((p) => (
+                          <li
+                            key={p.fingerprint}
+                            className="row-item pending-row"
+                          >
+                            <div className="pending-body">
+                              <strong>{p.suggestedTitle}</strong>
+                              <div className="meta">
+                                {p.processName}
+                                {p.exePath ? ` · ${p.exePath}` : ""}
+                              </div>
+                              <input
+                                className="field"
+                                value={
+                                  confirmTitles[p.fingerprint] ??
+                                  p.suggestedTitle
+                                }
+                                onChange={(e) =>
+                                  setConfirmTitles({
+                                    ...confirmTitles,
+                                    [p.fingerprint]: e.target.value,
+                                  })
+                                }
+                                aria-label="Game title"
+                              />
                             </div>
-                            <input
-                              value={
-                                confirmTitles[p.fingerprint] ??
-                                p.suggestedTitle
-                              }
-                              onChange={(e) =>
-                                setConfirmTitles({
-                                  ...confirmTitles,
-                                  [p.fingerprint]: e.target.value,
-                                })
-                              }
-                              aria-label="Game title"
-                            />
-                          </div>
-                          <div className="row-actions">
-                            <button
-                              type="button"
-                              className="btn btn-primary"
-                              onClick={async () => {
-                                try {
-                                  await invoke("confirm_game", {
-                                    fingerprint: p.fingerprint,
-                                    title:
-                                      confirmTitles[p.fingerprint] ??
-                                      p.suggestedTitle,
-                                  });
-                                  await refresh();
-                                } catch (e) {
-                                  showToast(String(e), true);
-                                }
-                              }}
-                            >
-                              Confirm
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-ghost"
-                              onClick={async () => {
-                                const identityId =
-                                  p.identityId ?? `user:${p.fingerprint}`;
-                                try {
-                                  await invoke("ignore_game", {
-                                    identityId,
-                                    title:
-                                      confirmTitles[p.fingerprint] ??
-                                      p.suggestedTitle,
-                                  });
-                                  await refresh();
-                                } catch (e) {
-                                  showToast(String(e), true);
-                                }
-                              }}
-                            >
-                              Don&apos;t track
-                            </button>
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
+                            <div className="row-actions">
+                              <button
+                                type="button"
+                                className="btn btn-primary"
+                                onClick={async () => {
+                                  try {
+                                    await invoke("confirm_game", {
+                                      fingerprint: p.fingerprint,
+                                      title:
+                                        confirmTitles[p.fingerprint] ??
+                                        p.suggestedTitle,
+                                    });
+                                    await refresh();
+                                  } catch (e) {
+                                    showToast(String(e), true);
+                                  }
+                                }}
+                              >
+                                Confirm
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-ghost"
+                                onClick={async () => {
+                                  const identityId =
+                                    p.identityId ?? `user:${p.fingerprint}`;
+                                  try {
+                                    await invoke("ignore_game", {
+                                      identityId,
+                                      title:
+                                        confirmTitles[p.fingerprint] ??
+                                        p.suggestedTitle,
+                                    });
+                                    await refresh();
+                                  } catch (e) {
+                                    showToast(String(e), true);
+                                  }
+                                }}
+                              >
+                                Don&apos;t track
+                              </button>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   )}
 
                   <h2 className="section-label">Tracking</h2>
@@ -737,43 +656,46 @@ function App() {
                       sessions from Home → Recent.
                     </p>
                   ) : null}
-                  <label className="field games-search">
+                  <label className="label games-search">
                     <span className="sr-only">Search games</span>
                     <input
+                      className="field"
                       value={gamesFilter}
                       onChange={(e) => setGamesFilter(e.target.value)}
                       placeholder="Search library…"
                     />
                   </label>
                   {filteredGames.length === 0 ? (
-                    <p className="empty-state">No games found</p>
+                    <EmptyFace title="No games found" />
                   ) : (
-                    <ul className="session-list compact tracking-list">
-                      {filteredGames.slice(0, 300).map((g) => (
-                        <li key={g.id} className="row-item track-row">
-                          <div>
-                            <span className="track-title">{g.title}</span>
-                            <div className="meta">
-                              {g.source}
-                              {!g.trackingEnabled ? " · off" : ""}
+                    <div className="panel-outline">
+                      <ul className="session-list compact tracking-list">
+                        {filteredGames.slice(0, 300).map((g) => (
+                          <li key={g.id} className="row-item track-row">
+                            <div>
+                              <span className="track-title">{g.title}</span>
+                              <div className="meta">
+                                {g.source}
+                                {!g.trackingEnabled ? " · off" : ""}
+                              </div>
                             </div>
-                          </div>
-                          <label className="toggle">
-                            <input
-                              type="checkbox"
-                              checked={g.trackingEnabled}
-                              onChange={(e) =>
-                                void setTracking(g, e.target.checked)
-                              }
-                              aria-label={`Track ${g.title}`}
-                            />
-                            <span className="toggle-ui" />
-                          </label>
-                        </li>
-                      ))}
-                    </ul>
+                            <label className="toggle">
+                              <input
+                                type="checkbox"
+                                checked={g.trackingEnabled}
+                                onChange={(e) =>
+                                  void setTracking(g, e.target.checked)
+                                }
+                                aria-label={`Track ${g.title}`}
+                              />
+                              <span className="toggle-ui" />
+                            </label>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   )}
-                </section>
+                </>
               )}
 
               {tab === "settings" && (
@@ -800,7 +722,7 @@ function App() {
         )}
       </div>
 
-      <footer className="bottombar">
+      <footer className="status-bar">
         <div className="sync-chips">
           <span
             className="chip"
@@ -826,93 +748,91 @@ function App() {
       </footer>
 
       {message ? (
-        <div
-          className={`toast ${messageIsError ? "err" : ""}`}
+        <button
+          type="button"
+          className="toast-wrap"
           onClick={() => setMessage(null)}
-          role="status"
         >
-          {message}
-        </div>
+          <HatchShadow
+            size="sm"
+            faceClassName={`dialog-face toast-face${messageIsError ? " toast-err" : ""}`}
+          >
+            {message}
+          </HatchShadow>
+        </button>
       ) : null}
 
-      {addOpen ? (
-        <div
-          className="dialog-backdrop"
-          role="presentation"
-          onClick={() => !adding && setAddOpen(false)}
-        >
-          <div
-            className="dialog"
-            role="dialog"
-            aria-labelledby="add-game-title"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 id="add-game-title">Add game</h2>
-            <p className="lede">
-              Track a title that Steam / Discord didn&apos;t pick up. When this
-              exe is running, qMonitor will start a session.
-            </p>
-            <label className="field">
-              <span>Name</span>
-              <input
-                value={addTitle}
-                onChange={(e) => setAddTitle(e.target.value)}
-                placeholder="Hades"
-                autoFocus
-              />
-            </label>
-            <div className="field">
-              <label htmlFor="add-exe">
-                <span>Exe or full path</span>
-              </label>
-              <div className="path-row">
-                <input
-                  id="add-exe"
-                  value={addExe}
-                  onChange={(e) => setAddExe(e.target.value)}
-                  placeholder="D:\Games\Hades\Hades.exe"
-                  aria-label="Exe or full path"
-                />
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => void browseExe()}
-                  disabled={adding}
-                >
-                  Browse
-                </button>
-              </div>
-            </div>
-            <label className="field">
-              <span>Steam App ID (optional)</span>
-              <input
-                value={addSteamId}
-                onChange={(e) => setAddSteamId(e.target.value)}
-                placeholder="1145360"
-                inputMode="numeric"
-              />
-            </label>
-            <div className="actions dialog-actions">
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => setAddOpen(false)}
-                disabled={adding}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => void submitAddGame()}
-                disabled={adding}
-              >
-                {adding ? "Adding…" : "Add"}
-              </button>
-            </div>
+      <Dialog
+        open={addOpen}
+        onClose={() => {
+          if (!adding) setAddOpen(false);
+        }}
+        title="Add game"
+      >
+        <p className="lede">
+          Track a title that Steam / Discord didn&apos;t pick up. When this exe
+          is running, qMonitor will start a session.
+        </p>
+        <label className="label">
+          <span>Name</span>
+          <input
+            className="field"
+            value={addTitle}
+            onChange={(e) => setAddTitle(e.target.value)}
+            placeholder="Hades"
+            autoFocus
+          />
+        </label>
+        <div className="label">
+          <span>Exe or full path</span>
+          <div className="path-row">
+            <input
+              id="add-exe"
+              className="field"
+              value={addExe}
+              onChange={(e) => setAddExe(e.target.value)}
+              placeholder="D:\Games\Hades\Hades.exe"
+              aria-label="Exe or full path"
+            />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => void browseExe()}
+              disabled={adding}
+            >
+              Browse
+            </button>
           </div>
         </div>
-      ) : null}
+        <label className="label">
+          <span>Steam App ID (optional)</span>
+          <input
+            className="field"
+            value={addSteamId}
+            onChange={(e) => setAddSteamId(e.target.value)}
+            placeholder="1145360"
+            inputMode="numeric"
+          />
+        </label>
+        <div className="actions dialog-actions">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => setAddOpen(false)}
+            disabled={adding}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => void submitAddGame()}
+            disabled={adding}
+          >
+            {adding ? "Adding…" : "Add"}
+          </button>
+        </div>
+      </Dialog>
     </div>
   );
 }

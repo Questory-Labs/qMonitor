@@ -14,6 +14,7 @@ import {
   type AuthState,
 } from "./components/Settings";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { invokeTimeout } from "./invoke-timeout";
 import {
   isBrowserPreview,
   PREVIEW_AUTH,
@@ -75,24 +76,6 @@ interface TrackableGame {
   steamAppId?: number;
   source: string;
   trackingEnabled: boolean;
-}
-
-async function invokeTimeout<T>(
-  cmd: string,
-  ms = 4000,
-  args?: Record<string, unknown>,
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      invoke<T>(cmd, args),
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${cmd} timed out`)), ms);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
 }
 
 function formatLiveClock(totalSecs: number) {
@@ -542,7 +525,7 @@ function App() {
                     }}
                     onIgnore={async (s) => {
                       try {
-                        await invoke("ignore_game", {
+                        await invokeTimeout("ignore_game", 4000, {
                           identityId: s.identityId,
                           title: s.title,
                         });

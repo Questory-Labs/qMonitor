@@ -117,6 +117,8 @@ export function RecentSessions({
       if (kind === "sync") await onSync(selected);
       else await onIgnore(selected);
       setSelected(null);
+    } catch {
+      // Keep the dialog open so the user can retry.
     } finally {
       setBusy(null);
     }

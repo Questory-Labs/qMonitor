@@ -1,6 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { useState, type ReactNode } from "react";
+import { invokeTimeout } from "../invoke-timeout";
 import { HatchShadow } from "./HatchShadow";
 import type { AppConfig, LogLevel } from "./Settings";
 
@@ -29,7 +29,7 @@ export function AdvancedSettings({
 }) {
   async function openLogs() {
     try {
-      const path = await invoke<string>("open_log_dir");
+      const path = await invokeTimeout<string>("open_log_dir", 8000);
       showToast(`Opened ${path}`);
     } catch (e) {
       showToast(String(e), true);
@@ -38,7 +38,7 @@ export function AdvancedSettings({
 
   async function openDb() {
     try {
-      const path = await invoke<string>("open_db");
+      const path = await invokeTimeout<string>("open_db", 8000);
       showToast(`Opened ${path}`);
     } catch (e) {
       showToast(String(e), true);

@@ -381,7 +381,8 @@ impl TursoDb {
         Ok(())
     }
 
-    /// CAS skipped → pending so Home → Recent can sync a held-back session.
+    /// Re-queue an ended, non-synced session (skipped/failed/pending) so Home → Recent
+    /// can sync a held-back session.
     pub async fn mark_pending_now(&self, id: &str) -> Result<(), String> {
         if id.starts_with("live:") {
             return Err("cannot sync a live session".into());
@@ -391,13 +392,13 @@ impl TursoDb {
             .conn
             .execute(
                 r#"UPDATE sessions SET push_status=?, next_retry_at=?, last_error=NULL
-                   WHERE id=? AND push_status='skipped' AND ended_at IS NOT NULL"#,
+                   WHERE id=? AND push_status IN ('skipped','failed','pending') AND ended_at IS NOT NULL"#,
                 (PushStatus::Pending.as_str(), next.as_str(), id),
             )
             .await
             .map_err(|e| e.to_string())?;
         if n == 0 {
-            return Err("session is not skipped".into());
+            return Err("session cannot be re-queued".into());
         }
         Ok(())
     }

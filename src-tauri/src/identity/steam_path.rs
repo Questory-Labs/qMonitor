@@ -145,8 +145,15 @@ fn is_path_noise(proc: &ProcessSnapshot) -> bool {
 }
 
 fn process_basename(process_name: &str) -> String {
+    // Backslash is a separator only on the host's Windows path grammar; on Unix it is a
+    // legal filename character and must be preserved.
+    #[cfg(windows)]
+    const SEPARATORS: &[char] = &['/', '\\'];
+    #[cfg(not(windows))]
+    const SEPARATORS: &[char] = &['/'];
+
     process_name
-        .rsplit(['/', '\\'])
+        .rsplit(SEPARATORS)
         .next()
         .unwrap_or(process_name)
         .to_ascii_lowercase()
@@ -209,7 +216,16 @@ mod tests {
             "CrimsonDesert.exe"
         ));
         assert!(exe_looks_like_title("Dota 2", "dota2.exe"));
+        assert!(exe_looks_like_title("Hades", "/Games/Hades/Hades.exe"));
+        #[cfg(windows)]
         assert!(exe_looks_like_title("Hades", r"D:\Games\Hades\Hades.exe"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn backslashes_are_not_separators_on_unix() {
+        // A Unix process filename may legitimately contain backslashes; keep it intact.
+        assert_eq!(process_basename(r"weird\name.exe"), r"weird\name.exe");
     }
 
     #[test]

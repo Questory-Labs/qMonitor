@@ -57,11 +57,9 @@ pub async fn start_listener(
 
     tauri::async_runtime::spawn(async move {
         while !cancel_task.load(Ordering::SeqCst) {
-            let accept = tokio::time::timeout(
-                std::time::Duration::from_millis(400),
-                listener.accept(),
-            )
-            .await;
+            let accept =
+                tokio::time::timeout(std::time::Duration::from_millis(400), listener.accept())
+                    .await;
             let Ok(Ok((mut socket, _))) = accept else {
                 continue;
             };
@@ -83,13 +81,7 @@ pub async fn start_listener(
                     if let Ok((code, state)) =
                         auth::parse_callback_code(&format!("http://127.0.0.1{path}"))
                     {
-                        match finish_code_exchange(
-                            &attempt_slot,
-                            &config_slot,
-                            &code,
-                            &state,
-                        )
-                        .await
+                        match finish_code_exchange(&attempt_slot, &config_slot, &code, &state).await
                         {
                             Ok(()) => {
                                 let _ = app.emit(
@@ -192,7 +184,9 @@ async fn finish_code_exchange(
 ) -> Result<(), String> {
     let attempt = {
         let guard = attempt_slot.lock().await;
-        guard.clone().ok_or_else(|| "no login attempt".to_string())?
+        guard
+            .clone()
+            .ok_or_else(|| "no login attempt".to_string())?
     };
     let cfg = config_slot.config.read().await.clone();
     auth::exchange_authorization_code(&cfg, &attempt, code, state).await?;
@@ -252,9 +246,8 @@ const MARK_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 
 </svg>"##;
 
 fn loopback_page(title: &str, inner: &str) -> String {
-    let mut html = String::from(
-        "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"/><title>",
-    );
+    let mut html =
+        String::from("<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"/><title>");
     html.push_str(title);
     html.push_str("</title><style>");
     html.push_str(LOOPBACK_CSS);

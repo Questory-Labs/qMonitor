@@ -114,9 +114,7 @@ pub fn crash_report_client() -> ProcessSnapshot {
     proc(
         1,
         "CrashReportClient.exe",
-        Some(
-            r"D:\Steam\steamapps\common\Apex Legends\Engine\Binaries\Win64\CrashReportClient.exe",
-        ),
+        Some(r"D:\Steam\steamapps\common\Apex Legends\Engine\Binaries\Win64\CrashReportClient.exe"),
         None,
     )
 }
@@ -131,20 +129,13 @@ pub fn r5apex_under_install() -> ProcessSnapshot {
     proc(
         1,
         name,
-        Some(&format!(
-            r"D:\Steam\steamapps\common\Apex Legends\{name}"
-        )),
+        Some(&format!(r"D:\Steam\steamapps\common\Apex Legends\{name}")),
         None,
     )
 }
 
 pub fn reaper_dota() -> ProcessSnapshot {
-    proc(
-        9,
-        "reaper",
-        None,
-        Some("reaper SteamLaunch AppId=570 --"),
-    )
+    proc(9, "reaper", None, Some("reaper SteamLaunch AppId=570 --"))
 }
 
 pub fn wineserver_under_dota() -> ProcessSnapshot {
@@ -227,11 +218,47 @@ mod tests {
     }
 
     #[test]
-    fn path_only_game_exe_is_not_auto_tracked_without_discord() {
+    fn path_only_mismatched_exe_goes_pending() {
         let pipeline = pipeline_with(apex_steam(), DetectableCatalog::default(), Vec::new());
         let (ids, pending) = pipeline.resolve_running(&[r5apex_under_install()]);
-        assert!(ids.is_empty(), "path-only Low must not auto-track: {ids:?}");
-        assert!(pending.is_empty());
+        assert!(
+            ids.is_empty(),
+            "mismatched exe must not auto-track: {ids:?}"
+        );
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].suggested_title, "Apex Legends");
+        assert_eq!(pending[0].identity_id.as_deref(), Some("steam:1172470"));
+    }
+
+    #[test]
+    fn steam_path_title_like_exe_auto_tracks_without_discord() {
+        let mut steam = SteamLibraryIndex::default();
+        steam.games.insert(
+            3321460,
+            SteamGame {
+                app_id: 3321460,
+                title: "Crimson Desert Enhanced".into(),
+                install_path: PathBuf::from(r"D:\SteamLibrary\steamapps\common\Crimson Desert"),
+            },
+        );
+        let pipeline = pipeline_with(steam, DetectableCatalog::default(), Vec::new());
+        let name = if cfg!(target_os = "windows") {
+            "CrimsonDesert.exe"
+        } else {
+            "CrimsonDesert"
+        };
+        let procs = vec![proc(
+            1,
+            name,
+            Some(r"D:\SteamLibrary\steamapps\common\Crimson Desert\bin64\CrimsonDesert.exe"),
+            None,
+        )];
+        let (ids, pending) = pipeline.resolve_running(&procs);
+        assert!(pending.is_empty(), "pending: {pending:?}");
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].steam_app_id, Some(3321460));
+        assert_eq!(ids[0].confidence, Confidence::Medium);
+        assert_eq!(ids[0].title, "Crimson Desert Enhanced");
     }
 
     #[test]

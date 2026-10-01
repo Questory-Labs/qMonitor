@@ -10,6 +10,7 @@ mod oauth_loopback;
 mod persist;
 mod pkce;
 mod push;
+mod push_policy;
 mod runtime;
 mod session;
 mod update_check;
@@ -47,12 +48,13 @@ async fn save_config(
 ) -> Result<AppConfig, String> {
     let (prev_url, prev_channel) = {
         let current = state.config.read().await;
-        (
-            current.resolved_detectable_url(),
-            current.update_channel,
-        )
+        (current.resolved_detectable_url(), current.update_channel)
     };
-    if config.base_url.as_ref().is_some_and(|u| !u.trim().is_empty()) {
+    if config
+        .base_url
+        .as_ref()
+        .is_some_and(|u| !u.trim().is_empty())
+    {
         auth::detect_and_apply(&mut config).await?;
     } else {
         config.api_root = None;
@@ -127,8 +129,7 @@ async fn start_login(
     *attempt.0.lock().await = Some(login_attempt);
 
     let app_state = Arc::clone(&*state);
-    let guard =
-        oauth_loopback::start_listener(app.clone(), attempt.0.clone(), app_state).await?;
+    let guard = oauth_loopback::start_listener(app.clone(), attempt.0.clone(), app_state).await?;
     *listener.0.lock().await = Some(guard);
 
     open::that(&url).map_err(|e| e.to_string())?;
@@ -222,10 +223,7 @@ async fn ignore_game(
 }
 
 #[tauri::command]
-async fn unignore_game(
-    state: State<'_, Arc<AppState>>,
-    identity_id: String,
-) -> Result<(), String> {
+async fn unignore_game(state: State<'_, Arc<AppState>>, identity_id: String) -> Result<(), String> {
     state.unignore_game(identity_id).await
 }
 
@@ -240,6 +238,11 @@ async fn add_manual_game(
         .add_manual_game(title, exe_path, steam_app_id)
         .await
         .map(|_| ())
+}
+
+#[tauri::command]
+async fn push_session(state: State<'_, Arc<AppState>>, session_id: String) -> Result<(), String> {
+    state.push_session(session_id).await
 }
 
 #[tauri::command]
@@ -379,6 +382,14 @@ pub fn run() {
                 }
             });
 
+            let steam_state = app_state.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    steam_state.refresh_steam_library().await;
+                }
+            });
+
             let update_state = app_state.clone();
             let update_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -444,6 +455,7 @@ pub fn run() {
             ignore_game,
             unignore_game,
             add_manual_game,
+            push_session,
             open_db,
             open_log_dir,
             is_onboarded,

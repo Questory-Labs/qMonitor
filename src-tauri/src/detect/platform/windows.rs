@@ -21,20 +21,12 @@ pub fn is_install_sidecar(proc: &ProcessSnapshot) -> bool {
         .unwrap_or("")
         .replace('\\', "/")
         .to_ascii_lowercase();
-    const SEGMENTS: &[&str] = &[
-        "/easyanticheat/",
-        "/battleye/",
-        "/eossdk/",
-        "/eosoverlay",
-    ];
+    const SEGMENTS: &[&str] = &["/easyanticheat/", "/battleye/", "/eossdk/", "/eosoverlay"];
     SEGMENTS.iter().any(|s| path.contains(s))
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub fn detect_steam(
-    processes: &[ProcessSnapshot],
-    steam: &SteamLibraryIndex,
-) -> Vec<GameIdentity> {
+pub fn detect_steam(processes: &[ProcessSnapshot], steam: &SteamLibraryIndex) -> Vec<GameIdentity> {
     let mut identities = steamlaunch_identities(processes, steam);
     for proc in processes {
         if is_denied(&proc.name) || is_install_sidecar(proc) {

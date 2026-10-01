@@ -1,8 +1,9 @@
 //! App state, pipeline prefs, and UI-facing home snapshot.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ use crate::db::{PushStatus, SessionRow, TursoDb};
 use crate::health::RuntimeHealth;
 use crate::identity::detectable::{self, DetectableCatalog, DETECTABLE_MAX_AGE};
 use crate::identity::resolver::{parse_exe_input, IdentityPipeline, UserMapping};
+use crate::identity::steam_library::SteamLibraryIndex;
 use crate::identity::{ManualGame, PendingDetection, TrackableGame};
 use crate::live_session::LiveSession;
 use crate::persist::{DbView, PersistCmd};
@@ -54,31 +56,29 @@ pub struct AppState {
     pub ignored_titles: RwLock<HashMap<String, String>>,
     pub pending_detections: RwLock<Vec<PendingDetection>>,
     pub last_error: RwLock<Option<String>>,
+    /// Session IDs queued or POSTing; survives persist DB reconnects.
+    pub push_in_flight: RwLock<HashSet<String>>,
+    steam_lib_epoch: AtomicU64,
+    steam_lib_refresh: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         let config = AppConfig::load();
-        let steam = config
-            .steam_path_override
-            .as_ref()
-            .map(PathBuf::from);
-        let catalog = config
-            .catalog_path
-            .as_ref()
-            .map(PathBuf::from)
-            .or_else(|| {
-                let p = PathBuf::from("catalogs/games.example.json");
-                if p.exists() {
-                    Some(p)
-                } else {
-                    None
-                }
-            });
+        let steam = config.steam_path_override.as_ref().map(PathBuf::from);
+        let catalog = config.catalog_path.as_ref().map(PathBuf::from).or_else(|| {
+            let p = PathBuf::from("catalogs/games.example.json");
+            if p.exists() {
+                Some(p)
+            } else {
+                None
+            }
+        });
         let pipeline = IdentityPipeline::new(
             steam.as_deref(),
             catalog.as_deref(),
             Default::default(),
+            None,
         );
         Self {
             config: RwLock::new(config),
@@ -91,6 +91,9 @@ impl AppState {
             ignored_titles: RwLock::new(HashMap::new()),
             pending_detections: RwLock::new(Vec::new()),
             last_error: RwLock::new(None),
+            push_in_flight: RwLock::new(HashSet::new()),
+            steam_lib_epoch: AtomicU64::new(0),
+            steam_lib_refresh: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -129,7 +132,13 @@ impl AppState {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(), String>>,
     {
-        if self.persist_tx.lock().ok().and_then(|g| g.clone()).is_some() {
+        if self
+            .persist_tx
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .is_some()
+        {
             drop(fallback);
             self.call_persist(make).await
         } else {
@@ -141,12 +150,13 @@ impl AppState {
         let cfg = self.config.read().await.clone();
         let steam = cfg.steam_path_override.as_ref().map(PathBuf::from);
         let catalog = cfg.catalog_path.as_ref().map(PathBuf::from);
-        let (mappings, ignored, manuals) = {
+        let (mappings, ignored, manuals, steam_fallback) = {
             let pipe = self.pipeline.read().await;
             (
                 pipe.user_mappings.clone(),
                 pipe.ignored_identities.clone(),
                 pipe.manual_games.clone(),
+                pipe.steam.clone(),
             )
         };
         let detectable = {
@@ -157,7 +167,12 @@ impl AppState {
                 pipe.detectable.clone()
             }
         };
-        let mut pipe = IdentityPipeline::new(steam.as_deref(), catalog.as_deref(), mappings);
+        let mut pipe = IdentityPipeline::new(
+            steam.as_deref(),
+            catalog.as_deref(),
+            mappings,
+            Some(steam_fallback),
+        );
         pipe.detectable = detectable;
         pipe.ignored_identities = ignored;
         pipe.manual_games = manuals;
@@ -182,6 +197,34 @@ impl AppState {
             "detectable catalog ready"
         );
         self.pipeline.write().await.detectable = catalog;
+    }
+
+    /// Reload the local Steam library index (new installs, renamed titles).
+    pub async fn refresh_steam_library(&self) {
+        let _refresh = self.steam_lib_refresh.lock().await;
+        let steam = self.config.read().await.steam_path_override.clone();
+        let path = steam.map(PathBuf::from);
+        let gen = self.steam_lib_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        let index =
+            match tokio::task::spawn_blocking(move || SteamLibraryIndex::load(path.as_deref()))
+                .await
+            {
+                Ok(Ok(index)) => index,
+                Ok(Err(e)) => {
+                    tracing::warn!(%e, "steam library reload failed");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(%e, "steam library reload join failed");
+                    return;
+                }
+            };
+        let mut pipe = self.pipeline.write().await;
+        if !commit_steam_library(&self.steam_lib_epoch, gen, &mut pipe.steam, index) {
+            tracing::debug!(gen, "steam library reload superseded");
+            return;
+        }
+        tracing::info!(games = pipe.steam.games.len(), "steam library index ready");
     }
 
     pub async fn home_state(&self) -> HomeState {
@@ -215,7 +258,11 @@ impl AppState {
         }
     }
 
-    pub async fn confirm_detection(&self, fingerprint: String, title: String) -> Result<(), String> {
+    pub async fn confirm_detection(
+        &self,
+        fingerprint: String,
+        title: String,
+    ) -> Result<(), String> {
         let identity_id = format!("user:{fingerprint}");
         let mapping = UserMapping {
             fingerprint: fingerprint.clone(),
@@ -358,6 +405,38 @@ impl AppState {
         .await?;
         Ok(game)
     }
+
+    pub async fn push_session(&self, session_id: String) -> Result<(), String> {
+        if session_id.starts_with("live:") {
+            return Err("cannot sync a live session".into());
+        }
+        self.persist_or_db(
+            |reply| PersistCmd::ForcePush {
+                session_id: session_id.clone(),
+                reply,
+            },
+            || async {
+                if let Some(db) = self.db.read().await.as_ref() {
+                    db.mark_pending_now(&session_id).await?;
+                }
+                Ok(())
+            },
+        )
+        .await
+    }
+}
+
+fn commit_steam_library(
+    epoch: &AtomicU64,
+    gen: u64,
+    steam: &mut SteamLibraryIndex,
+    next: SteamLibraryIndex,
+) -> bool {
+    if epoch.load(Ordering::Acquire) != gen {
+        return false;
+    }
+    *steam = next;
+    true
 }
 
 fn overlay_active(live: &LiveSession, db_active: Option<SessionRow>) -> Option<SessionRow> {
@@ -390,7 +469,6 @@ fn overlay_active(live: &LiveSession, db_active: Option<SessionRow>) -> Option<S
         last_error: None,
     })
 }
-
 
 pub async fn list_trackable_games(state: &AppState) -> Vec<TrackableGame> {
     let ignored_titles = state.ignored_titles.read().await.clone();
@@ -477,10 +555,12 @@ pub async fn list_trackable_games(state: &AppState) -> Vec<TrackableGame> {
 mod tests {
     use super::*;
     use crate::db::TursoDb;
+    use crate::identity::steam_library::{write_test_library, SteamGame};
     use crate::identity::{Confidence, GameIdentity};
     use crate::live_session::{DetectSample, LiveSession};
     use crate::persist::flush_live;
     use chrono::{Duration, Utc};
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     fn identity(id: &str, title: &str) -> GameIdentity {
@@ -532,6 +612,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn push_session_marks_skipped_pending() {
+        let state = AppState::new();
+        let dir = tempdir().unwrap();
+        let db = TursoDb::open(dir.path().join("force.db")).await.unwrap();
+        let started = Utc::now() - Duration::seconds(20);
+        let row = db
+            .open_session_at(&identity("steam:570", "Dota"), started)
+            .await
+            .unwrap();
+        let policy = crate::push_policy::PushPolicy {
+            min_duration_secs: 300,
+            allowlist: None,
+        };
+        db.end_session_with_policy(&row.id, Utc::now(), &policy)
+            .await
+            .unwrap();
+        *state.db.write().await = Some(std::sync::Arc::new(db));
+        state.push_session(row.id.clone()).await.unwrap();
+        let db = state.db.read().await.clone().unwrap();
+        let due = db.list_due_pushes().await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, row.id);
+        assert_eq!(due[0].push_status, crate::db::PushStatus::Pending);
+        assert!(state.push_session("live:steam:570".into()).await.is_err());
+    }
+
+    #[tokio::test]
     async fn detect_updates_live_when_persist_is_offline() {
         let state = AppState::new();
         let t0 = Utc::now();
@@ -541,7 +648,10 @@ mod tests {
         };
         state.live.write().await.apply(&sample);
         let home = state.home_state().await;
-        assert_eq!(home.active.as_ref().map(|a| a.identity_id.as_str()), Some("steam:1"));
+        assert_eq!(
+            home.active.as_ref().map(|a| a.identity_id.as_str()),
+            Some("steam:1")
+        );
         assert!(!home.sync.turso_ok);
         state.live.write().await.apply(&DetectSample {
             observed_at: t0 + Duration::seconds(9),
@@ -575,5 +685,114 @@ mod tests {
         let actives = db.list_active().await.unwrap();
         assert_eq!(actives.len(), 1);
         assert_eq!(actives[0].identity_id, "steam:1172470");
+    }
+
+    async fn seed_old_game(state: &AppState) {
+        state.pipeline.write().await.steam.games.insert(
+            1,
+            SteamGame {
+                app_id: 1,
+                title: "Old".into(),
+                install_path: PathBuf::from("/old"),
+            },
+        );
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[tokio::test]
+    async fn refresh_steam_library_replaces_index_on_success() {
+        let state = AppState::new();
+        seed_old_game(&state).await;
+        let dir = tempdir().unwrap();
+        write_test_library(dir.path(), 570, "Dota 2", "dota 2 beta").unwrap();
+        state.config.write().await.steam_path_override =
+            Some(dir.path().to_string_lossy().into_owned());
+        state.refresh_steam_library().await;
+        let steam = &state.pipeline.read().await.steam;
+        assert!(steam.games.get(&1).is_none());
+        assert_eq!(
+            steam.games.get(&570).map(|g| g.title.as_str()),
+            Some("Dota 2")
+        );
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[tokio::test]
+    async fn refresh_steam_library_preserves_index_on_load_failure() {
+        let state = AppState::new();
+        seed_old_game(&state).await;
+        let dir = tempdir().unwrap();
+        state.config.write().await.steam_path_override = Some(
+            dir.path()
+                .join("missing-steam")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        state.refresh_steam_library().await;
+        let steam = &state.pipeline.read().await.steam;
+        assert_eq!(steam.games.get(&1).map(|g| g.title.as_str()), Some("Old"));
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[tokio::test]
+    async fn reload_pipeline_preserves_steam_index_on_load_failure() {
+        let state = AppState::new();
+        seed_old_game(&state).await;
+        let dir = tempdir().unwrap();
+        state.config.write().await.steam_path_override = Some(
+            dir.path()
+                .join("missing-steam")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        state.reload_pipeline().await;
+        let steam = &state.pipeline.read().await.steam;
+        assert_eq!(steam.games.get(&1).map(|g| g.title.as_str()), Some("Old"));
+    }
+
+    #[test]
+    fn commit_steam_library_skips_superseded_generation() {
+        let epoch = AtomicU64::new(2);
+        let mut steam = SteamLibraryIndex::default();
+        steam.games.insert(
+            1,
+            SteamGame {
+                app_id: 1,
+                title: "Keep".into(),
+                install_path: PathBuf::from("/keep"),
+            },
+        );
+        let mut next = SteamLibraryIndex::default();
+        next.games.insert(
+            570,
+            SteamGame {
+                app_id: 570,
+                title: "Dota 2".into(),
+                install_path: PathBuf::from("/dota"),
+            },
+        );
+        assert!(!commit_steam_library(&epoch, 1, &mut steam, next));
+        assert_eq!(steam.games.get(&1).map(|g| g.title.as_str()), Some("Keep"));
+        assert!(steam.games.get(&570).is_none());
+    }
+
+    #[test]
+    fn commit_steam_library_applies_current_generation() {
+        let epoch = AtomicU64::new(3);
+        let mut steam = SteamLibraryIndex::default();
+        let mut next = SteamLibraryIndex::default();
+        next.games.insert(
+            570,
+            SteamGame {
+                app_id: 570,
+                title: "Dota 2".into(),
+                install_path: PathBuf::from("/dota"),
+            },
+        );
+        assert!(commit_steam_library(&epoch, 3, &mut steam, next));
+        assert_eq!(
+            steam.games.get(&570).map(|g| g.title.as_str()),
+            Some("Dota 2")
+        );
     }
 }
